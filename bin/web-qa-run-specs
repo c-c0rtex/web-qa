@@ -1,0 +1,38 @@
+#!/bin/bash
+# Run generated Playwright specs in <project>/.web-qa/specs/
+# Usage: web-qa-run-specs --alias <alias> [-- <playwright args>]
+
+set -e
+
+SKILL_DIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
+ALIAS=""
+PW_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --alias) ALIAS="$2"; shift 2 ;;
+    --) shift; PW_ARGS=("$@"); break ;;
+    *) PW_ARGS+=("$1"); shift ;;
+  esac
+done
+
+if [ -z "$ALIAS" ]; then
+  echo "usage: web-qa-run-specs --alias <alias> [-- <playwright args>]" >&2
+  exit 2
+fi
+
+PROJECT_PATH=$(python3 -c "
+import json, sys
+with open('$SKILL_DIR/projects.json') as f:
+    for p in json.load(f):
+        if p['alias'] == '$ALIAS':
+            print(p['path']); sys.exit(0)
+sys.exit(1)
+") || { echo "alias not found: $ALIAS" >&2; exit 2; }
+
+cd "$PROJECT_PATH/.web-qa"
+if [ ! -f playwright.config.ts ]; then
+  echo "no playwright.config.ts in $PROJECT_PATH/.web-qa — run web-qa-spec-init first" >&2
+  exit 2
+fi
+
+exec npx playwright test "${PW_ARGS[@]}"

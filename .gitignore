@@ -1,0 +1,11 @@
+# machine-local registry with credentials — never commit
+projects.json
+
+# local Claude Code session state
+.claude/
+CLAUDE.local.md
+
+.venv/
+__pycache__/
+*.pyc
+node_modules/

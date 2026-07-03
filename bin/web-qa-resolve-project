@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Resolve cwd → web-qa project record (longest path-prefix match).
+
+Usage:
+  web-qa-resolve-project                # uses $PWD
+  web-qa-resolve-project /some/path
+  web-qa-resolve-project --json         # full record
+  web-qa-resolve-project --alias name   # resolve by alias
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+REGISTRY = Path(__file__).resolve().parent.parent / "projects.json"
+
+
+def load() -> list[dict]:
+    if not REGISTRY.exists():
+        return []
+    try:
+        return json.loads(REGISTRY.read_text())
+    except json.JSONDecodeError:
+        return []
+
+
+def resolve_by_path(path: str) -> dict | None:
+    entries = load()
+    p = os.path.abspath(path)
+    best: tuple[int, dict] | None = None
+    fallback: dict | None = None
+    for e in entries:
+        ep = e.get("path")
+        if ep == "*":
+            fallback = e
+            continue
+        if not ep:
+            continue
+        ep_abs = os.path.abspath(ep)
+        if p == ep_abs or p.startswith(ep_abs.rstrip("/") + "/"):
+            score = len(ep_abs)
+            if best is None or score > best[0]:
+                best = (score, e)
+    if best:
+        return best[1]
+    return fallback
+
+
+def resolve_by_alias(alias: str) -> dict | None:
+    for e in load():
+        if e.get("alias") == alias:
+            return e
+    return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("path", nargs="?", default=None)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--alias")
+    args = ap.parse_args()
+
+    rec = resolve_by_alias(args.alias) if args.alias else resolve_by_path(args.path or os.getcwd())
+    if not rec:
+        print(json.dumps({"error": "no entry"}), file=sys.stderr)
+        return 2
+    if rec.get("target_url") is None:
+        print(json.dumps({"error": "matched but target_url is null", "alias": rec.get("alias")}), file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(rec, ensure_ascii=False))
+    else:
+        print(rec["target_url"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run all scenarios for a project (passive checks; mutating TCs marked MANUAL).
+# Usage: web-qa-run --alias <name> [--scenarios "*.md" | --include-mutating]
+set -e
+SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
+exec uv run --project "$SKILL" python "$SKILL/runners/run_scenarios.py" "$@"

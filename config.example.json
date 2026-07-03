@@ -1,0 +1,40 @@
+{
+  "alias": "my-app",
+  "path": "/home/me/projects/my-app",
+  "target_url": "http://127.0.0.1:3000",
+  "backend_url": "http://127.0.0.1:8000",
+  "auth": null,
+
+  "stack": "Next.js + FastAPI admin",
+  "language": "English",
+  "test_data_prefix": "QA-",
+
+  "backend_prefixes": ["/auth", "/api", "/health", "/orders/{", "/admin"],
+
+  "route_hints": [
+    { "path": "/orders", "keywords": ["order", "orders table", "filter", "status"] },
+    { "path": "/admin/users", "keywords": ["user management", "admin/users"] },
+    { "path": "/", "keywords": ["dashboard", "kpi"] }
+  ],
+
+  "id_discovery": [
+    { "endpoint": "/orders", "key": "order" }
+  ],
+
+  "auth_login_hint": "POST {backend}/auth/login returns JWT `access_token` in the JSON body (NOT a cookie). Do the login via `page.request.post` so the refresh-cookie lands in the browser context — after that `page.goto()` is authorized automatically. For Node-side API setup/teardown calls create a separate request context with `extraHTTPHeaders: { Authorization: `Bearer ${access_token}` }`.",
+
+  "auth_flow_notes": [
+    "Login: `POST /auth/login` JSON `{email, password}` → 200, JWT `access_token` in the response body",
+    "API requests: header `Authorization: Bearer <access_token>`",
+    "Frontend gates with `307 → /login` for unauthenticated visits"
+  ],
+
+  "context_notes": [
+    "Public tunnel URL exists, but tests should use 127.0.0.1 to avoid network flakiness."
+  ],
+
+  "visual_masks": [".live-clock", "[data-testid='notifications-badge']"],
+  "visual_exclude": ["/", "/orders"],
+
+  "gate_exclude": ["analytics*"]
+}

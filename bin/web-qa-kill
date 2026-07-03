@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Kill orphaned playwright test runners and their browsers.
+# Safe by construction: matches only ms-playwright browser binaries (installed test
+# browsers live under ~/.cache/ms-playwright/) and @playwright/test node CLIs —
+# a regular user Chrome/Chromium never matches these paths.
+# Usage: web-qa-kill [--dry-run]
+
+PATTERNS=('ms-playwright' '@playwright/test')
+
+list_procs() {
+  for p in "${PATTERNS[@]}"; do
+    pgrep -af "$p" 2>/dev/null
+  done | grep -v "web-qa-kill" | sort -u
+}
+
+found="$(list_procs)"
+if [ -z "$found" ]; then
+  echo "no orphaned playwright processes"
+  exit 0
+fi
+
+echo "found:"
+echo "$found"
+
+if [ "$1" = "--dry-run" ]; then
+  exit 0
+fi
+
+for p in "${PATTERNS[@]}"; do
+  pkill -f "$p" 2>/dev/null
+done
+sleep 1
+for p in "${PATTERNS[@]}"; do
+  pkill -9 -f "$p" 2>/dev/null
+done
+
+remaining="$(list_procs)"
+if [ -z "$remaining" ]; then
+  echo "killed all"
+else
+  echo "still alive (investigate manually):"
+  echo "$remaining"
+  exit 1
+fi

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Run Exploration agent: login as admin → crawl frontend → write .web-qa/app.context.md
+# Usage:
+#   web-qa-explore --alias <name> [--email ... --password ... --max-pages 30]
+
+set -e
+SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
+exec uv run --project "$SKILL" python "$SKILL/runners/explore.py" "$@"

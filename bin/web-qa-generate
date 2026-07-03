@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Phase 3: generate scenario md from git diff or task text.
+# Usage: web-qa-generate --alias <name> (--diff <ref> | --task "...") [--out f.md] [--prefix X] [--force]
+set -e
+SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
+exec uv run --project "$SKILL" python "$SKILL/runners/gen_scenarios.py" "$@"

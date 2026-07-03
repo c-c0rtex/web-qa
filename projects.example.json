@@ -1,0 +1,20 @@
+[
+  {
+    "alias": "default",
+    "path": "*",
+    "target_url": null,
+    "backend_url": null,
+    "auth": {},
+    "note": "Fallback entry. Register real projects with bin/web-qa-register-project."
+  },
+  {
+    "alias": "my-app",
+    "path": "/home/me/projects/my-app",
+    "target_url": "http://127.0.0.1:3000",
+    "backend_url": "http://127.0.0.1:8000",
+    "auth": { "email": "admin@example.com", "password": "change-me" },
+    "roles": [
+      { "name": "viewer", "email": "viewer@example.com", "password": "change-me" }
+    ]
+  }
+]

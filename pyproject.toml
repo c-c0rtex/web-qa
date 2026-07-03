@@ -1,0 +1,18 @@
+[project]
+name = "web-qa"
+version = "0.9.0"
+description = "Autonomous web-app QA skill for Claude Code: Playwright E2E, visual regression, axe-core a11y, LLM-generated self-healing specs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "c-c0rtex" }]
+dependencies = [
+    "playwright>=1.55",
+    "httpx>=0.27",
+    "pillow>=10.0",
+    "numpy>=1.26",
+]
+
+[tool.uv]
+# Not a python package — just scripts with pinned deps. uv manages the env only.
+package = false
