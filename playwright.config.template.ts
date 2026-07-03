@@ -30,9 +30,11 @@ export default defineConfig({
   reporter: [['list'], ['json', { outputFile: 'reports/playwright-results.json' }]],
   timeout: 30_000,
   expect: { timeout: 8_000 },
+  // 2 retries in CI separate transient flakes from real failures; 0 locally for fast feedback
+  retries: process.env.CI ? 2 : 0,
   use: {
     baseURL: 'http://127.0.0.1:3000',
-    trace: 'retain-on-failure',
+    trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'off',
     headless: true,

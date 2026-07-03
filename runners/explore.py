@@ -287,6 +287,12 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
             except Exception as e:
                 pages.append({"url": url, "error": f"extract failed: {e}"})
                 continue
+            try:
+                # role/name ground truth for getByRole — far better selector grounding
+                # than our element tables alone (idea borrowed from Playwright's agents)
+                summary["aria"] = page.locator("body").aria_snapshot()[:800]
+            except Exception:
+                pass
             pages.append(summary)
 
             # Enqueue same-origin internal links
@@ -359,6 +365,25 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
             lines.append(f"- `{path}`: headers=[{', '.join(t.get('headers', []))}], rows={t.get('rowCount', 0)}")
     if not has_any:
         lines.append("_(no tables encountered)_")
+    lines.append("")
+
+    # ===== ARIA snapshots =====
+    lines.append("## ARIA snapshots (role/name — ground truth for getByRole)\n")
+    aria_budget = 8000
+    used = 0
+    any_aria = False
+    for p in pages:
+        a = p.get("aria")
+        if not a:
+            continue
+        if used + len(a) > aria_budget:
+            lines.append("_(aria budget reached — remaining routes omitted)_")
+            break
+        any_aria = True
+        used += len(a)
+        lines.append(f"### `{p.get('path', '')}`\n```yaml\n{a}\n```")
+    if not any_aria:
+        lines.append("_(no aria snapshots captured)_")
     lines.append("")
 
     # ===== Backend endpoints =====

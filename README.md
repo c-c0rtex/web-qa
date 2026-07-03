@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/c-c0rtex/web-qa/ci.yml?style=flat-square&label=CI" alt="CI">
-  <img src="https://img.shields.io/badge/version-0.3.1-blue?style=flat-square" alt="Version 0.3.1">
+  <img src="https://img.shields.io/badge/version-0.3.2-blue?style=flat-square" alt="Version 0.3.2">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/uv-managed-DE5FE9?style=flat-square" alt="uv">
@@ -138,3 +138,5 @@ Generated tests, reports, and app maps produced by this tool are yours, no strin
 ## License
 
 [MIT](LICENSE) © [c-c0rtex](https://github.com/c-c0rtex)
+
+The four-stage pipeline architecture was inspired by [Playwright's test agents](https://playwright.dev) (Planner / Generator / Healer) and [TestDino](https://testdino.com)'s writing on AI-driven Playwright testing. No code or text was copied — the ideas were reimplemented from scratch.

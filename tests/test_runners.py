@@ -25,7 +25,8 @@ from matrix import (
     rows_for_role,
     update_history,
 )
-from maintain import failing_specs_from_report
+from maintain import classify_heal_output, failing_specs_from_report, record_app_bug
+from spec_gen import load_seed
 from run_scenarios import (
     classify,
     extract_paths,
@@ -220,6 +221,7 @@ def test_prompt_format_survives_braces_in_values():
         stack="s", frontend_url="f", backend_url="b", login_email="e", login_password="p",
         test_data_prefix="QA-",
         auth_login_hint="use `Bearer ${access_token}` and {email, password}",
+        seed_section="```ts\nconst t = `x${y}`;\n```",
         app_context="ctx", tc_body="## TC-1 — t",
     )
     assert "Bearer ${access_token}" in p and "{email, password}" in p
@@ -320,6 +322,40 @@ def test_rbac_trigger_fires_on_real_access_control():
 
 
 # ---------- maintain ----------
+
+def test_classify_heal_output_three_way():
+    assert classify_heal_output("// TRANSIENT: dev server was down\nimport ...") == \
+        ("transient", "dev server was down")
+    kind, detail = classify_heal_output("// APP-BUG: needs_sale_price missing from presenter\ntest.fixme(...)")
+    assert kind == "app-bug" and "presenter" in detail
+    assert classify_heal_output("import { test } from '@playwright/test';") == ("fix", "")
+    # marker must be at the head, not buried in code
+    assert classify_heal_output("import x;\n" + "a\n" * 40 + "// APP-BUG: deep")[0] == "fix"
+
+
+def test_record_app_bug_appends(tmp_path):
+    (tmp_path / ".web-qa").mkdir()
+    record_app_bug(tmp_path, "orders.spec.ts", "delete button 500s")
+    record_app_bug(tmp_path, "cart.spec.ts", "total ignores discount")
+    text = (tmp_path / ".web-qa" / "BUGS.md").read_text()
+    assert text.startswith("# BUGS")
+    assert "orders.spec.ts" in text and "total ignores discount" in text
+
+
+def test_load_seed_absent_and_present(tmp_path):
+    (tmp_path / ".web-qa").mkdir()
+    assert load_seed(tmp_path) == ""
+    (tmp_path / ".web-qa" / "seed.spec.ts").write_text("const AUTH = 'known-good';")
+    assert "known-good" in load_seed(tmp_path)
+
+
+def test_render_context_md_includes_aria_section():
+    pages = [{"path": "/orders", "title": "Orders", "headings": [], "forms": [], "tables": [],
+              "buttons": [], "links": [], "aria": "- button \"Create order\"\n- table"}]
+    md = render_context_md({"alias": "t", "target_url": "http://x"}, pages, {}, {})
+    assert "ARIA snapshots" in md
+    assert 'button "Create order"' in md
+
 
 def test_failing_specs_extracted_with_errors():
     report = {"suites": [{"suites": [{"specs": [

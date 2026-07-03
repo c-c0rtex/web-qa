@@ -82,6 +82,7 @@ Agent skill for testing web applications: E2E + visual regression + a11y + scena
 
 <project>/.web-qa/                        # per-project state (lives in the project repo)
 ├── config.json                           # ALL project specifics (see config.example.json)
+├── seed.spec.ts                          # OPTIONAL: human-verified auth/setup code — spec-gen and maintain reuse its patterns verbatim (strongest auth grounding)
 ├── package.json                          # isolated npm root for @playwright/test
 ├── app.context.md                        # crawled app map (Exploration writes)
 ├── scenarios/                            # *.md test cases (generated or hand-written)
@@ -130,7 +131,7 @@ Env: `WEBQA_CLAUDE_MODEL=sonnet|opus` — model for internal `claude -p` calls (
 | `web-qa-spec-gen --alias <a> [--all] [--tc <id>] [--force] [--workers N]` | Generate `.spec.ts` from TCs via `claude -p` (parallel, default 3 workers). App map embedded in the prompt; every spec validated with `playwright test --list`, 1 retry with the error fed back. Cache covers TC + prompt + context |
 | `web-qa-run-specs --alias <a> [-- <playwright args>]` | `npx playwright test` over generated specs |
 | `web-qa-matrix --alias <a> [--list] [--roles a,b] [--viewports d,m] [--workers N] [--include-adhoc] [--skip-passive\|--skip-specs]` | **Deploy gate**: inventory of ALL project tests (scenario TCs + specs) + full run + consolidated matrix with route coverage (global AND per-role) and flaky markers. `--viewports` runs the passive stage per viewport (× roles); a device-viewport also runs specs under mobile emulation (second playwright project) (history in `.web-qa/history.json`). Exit 0 = safe to deploy, 1 = fail/error present. `--list` = inventory + coverage only |
-| `web-qa-maintain --alias <a> [--report <json>] [--apply] [--workers N]` | Self-heal: feeds each failing spec + its real error output to claude → corrected spec. Default writes `*.spec.ts.proposed`; `--apply` overwrites in place (keeps `.bak`, rolls back if the fix doesn't parse) |
+| `web-qa-maintain --alias <a> [--report <json>] [--apply] [--workers N]` | Self-heal with three-way classification: test fragility → corrected spec (`*.spec.ts.proposed`; `--apply` overwrites with `.bak` + rollback); transient env failure → spec untouched, rerun advised; genuine app bug → assertions kept, `test.fixme` + entry appended to `BUGS.md`. Healers patch test fragility, never real bugs |
 | `web-qa-kill [--dry-run]` | Kill orphaned playwright runners + headless browsers (matches only `ms-playwright` binaries and `@playwright/test` CLIs — never a regular browser) |
 
 **Per-project specs runner setup (once):**

@@ -20,19 +20,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, viewport_env
-from spec_gen import call_claude, validate_spec, load_app_context, postprocess_spec
+from spec_gen import call_claude, validate_spec, load_app_context, load_seed, postprocess_spec
 
 FIX_PROMPT = """You are fixing a FAILING Playwright TypeScript spec for an existing web app.
 The app itself is considered correct — the spec has wrong selectors, timing or assertions.
 
 APP MAP (auto-crawled; REAL routes, form fields, button labels and table headers — trust it over guesses):
 {app_context}
+{seed_section}
 
 CURRENT SPEC ({spec_name}):
 {spec_code}
@@ -40,7 +43,19 @@ CURRENT SPEC ({spec_name}):
 ACTUAL FAILURE OUTPUT from `playwright test` (contains the real page state / selector mismatches):
 {errors}
 
-TASK: Output the FULL corrected .spec.ts file. Rules:
+TASK — FIRST classify the failure, THEN act:
+(a) TEST FRAGILITY (selector drift, timing, wrong assumption about the page) → output the
+    corrected spec
+(b) TRANSIENT ENVIRONMENT FAILURE (connection refused, dev server down, 5xx from
+    infrastructure, network timeout unrelated to the app logic) → output the ORIGINAL spec
+    UNCHANGED with one added first line: `// TRANSIENT: <reason>` — do not "fix" flakiness
+    into the code
+(c) GENUINE APPLICATION BUG (the app really violates the test's Expected) → keep the
+    assertions EXACTLY as they are (never weaken them to make the test pass), replace
+    `test(` with `test.fixme(` and add a first line `// APP-BUG: <one-line description>` —
+    healers patch test fragility, not real bugs
+
+Rules for case (a):
 - Output ONLY raw TypeScript code — no markdown fences, no commentary
 - Keep the same test intent and assertions coverage; fix only what makes it fail
 - Selector texts/labels MUST come from the APP MAP or from the failure output (e.g. the "received" strings), never invented
@@ -101,11 +116,39 @@ def failing_specs_from_report(report: dict) -> dict[str, list[str]]:
     return fails
 
 
+RE_TRANSIENT = re.compile(r"^\s*//\s*TRANSIENT:\s*(.+)$", re.MULTILINE)
+RE_APP_BUG = re.compile(r"^\s*//\s*APP-BUG:\s*(.+)$", re.MULTILINE)
+
+
+def classify_heal_output(code: str) -> tuple[str, str]:
+    """('transient'|'app-bug'|'fix', detail) from the healer's leading marker comment.
+    Only the first lines count — a marker buried mid-code is not a classification."""
+    head = "\n".join(code.splitlines()[:3])
+    m = RE_TRANSIENT.search(head)
+    if m:
+        return "transient", m.group(1).strip()
+    m = RE_APP_BUG.search(head)
+    if m:
+        return "app-bug", m.group(1).strip()
+    return "fix", ""
+
+
+def record_app_bug(proj_dir: Path, spec_name: str, description: str) -> None:
+    """Append a healer-confirmed application bug to .web-qa/BUGS.md."""
+    bugs = proj_dir / ".web-qa" / "BUGS.md"
+    if not bugs.is_file():
+        bugs.write_text("# BUGS\n\n")
+    with bugs.open("a", encoding="utf-8") as f:
+        f.write(f"- {date.today().isoformat()} [maintain] `{spec_name}`: {description}\n")
+
+
 def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
-             apply_fix: bool) -> tuple[str, str | None, str | None]:
-    """Returns (spec_name, out_file_or_None, error_or_None)."""
+             apply_fix: bool, seed_section: str = "") -> tuple[str, str | None, str | None, str, str]:
+    """Returns (spec_name, out_file_or_None, error_or_None, kind, detail).
+    kind: 'fix' | 'transient' | 'app-bug'."""
     prompt = FIX_PROMPT.format(
         app_context=app_context,
+        seed_section=seed_section,
         spec_name=spec_path.name,
         spec_code=spec_path.read_text(encoding="utf-8")[:12000],
         errors="\n\n---\n\n".join(errors[:4]),
@@ -113,9 +156,14 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
     try:
         code = postprocess_spec(call_claude(prompt))
     except Exception as e:
-        return spec_path.name, None, f"claude failed: {e}"
+        return spec_path.name, None, f"claude failed: {e}", "fix", ""
     if not code.strip():
-        return spec_path.name, None, "empty output from claude"
+        return spec_path.name, None, "empty output from claude", "fix", ""
+
+    kind, detail = classify_heal_output(code)
+    if kind == "transient":
+        # nothing to write — the spec is fine, the environment hiccuped
+        return spec_path.name, None, None, kind, detail
 
     if apply_fix:
         spec_path.with_suffix(spec_path.suffix + ".bak").write_text(
@@ -132,8 +180,8 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
             # roll back
             out_file.write_text(out_file.with_suffix(out_file.suffix + ".bak").read_text(encoding="utf-8"),
                                 encoding="utf-8")
-            return spec_path.name, None, f"fix did not parse, rolled back: {parse_err[:300]}"
-    return spec_path.name, str(out_file), None
+            return spec_path.name, None, f"fix did not parse, rolled back: {parse_err[:300]}", kind, detail
+    return spec_path.name, str(out_file), None, kind, detail
 
 
 def main() -> int:
@@ -167,7 +215,13 @@ def main() -> int:
         return 0
 
     app_context = load_app_context(proj_dir)
-    summary = {"healed": [], "errors": [], "mode": "apply" if args.apply else "propose"}
+    seed = load_seed(proj_dir)
+    seed_section = (
+        "\nKNOWN-GOOD SEED SPEC (human-verified code from THIS repo — reuse its auth/setup "
+        "patterns VERBATIM):\n```ts\n" + seed + "\n```\n" if seed else ""
+    )
+    summary = {"healed": [], "transient": [], "app_bugs": [], "errors": [],
+               "mode": "apply" if args.apply else "propose"}
     print(f"[maintain] {len(fails)} failing spec(s), {args.workers} workers", file=sys.stderr)
 
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
@@ -177,12 +231,19 @@ def main() -> int:
             if not spec_path.is_file():
                 summary["errors"].append({"spec": fname, "error": "spec file not found"})
                 continue
-            futures[pool.submit(heal_one, spec_path, errors, app_context, webqa, args.apply)] = fname
+            futures[pool.submit(heal_one, spec_path, errors, app_context, webqa, args.apply, seed_section)] = fname
         for fut in as_completed(futures):
-            name, out_file, err = fut.result()
+            name, out_file, err, kind, detail = fut.result()
             if err:
                 summary["errors"].append({"spec": name, "error": err})
                 print(f"[maintain] FAIL {name}: {err[:200]}", file=sys.stderr)
+            elif kind == "transient":
+                summary["transient"].append({"spec": name, "reason": detail})
+                print(f"[maintain] TRANSIENT {name}: {detail[:120]} (spec untouched — rerun)", file=sys.stderr)
+            elif kind == "app-bug":
+                summary["app_bugs"].append({"spec": name, "bug": detail, "out": out_file})
+                record_app_bug(proj_dir, name, detail)
+                print(f"[maintain] APP-BUG {name}: {detail[:120]} → test.fixme + BUGS.md", file=sys.stderr)
             else:
                 summary["healed"].append({"spec": name, "out": out_file})
                 print(f"[maintain] OK   {name} → {out_file}", file=sys.stderr)

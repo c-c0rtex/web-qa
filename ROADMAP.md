@@ -6,6 +6,18 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.3.2 (industry best practices)
+
+- **Seed spec grounding** — optional committed `.web-qa/seed.spec.ts` (human-verified
+  auth/setup code) is embedded into generation and healing prompts: working code beats a
+  prose auth hint
+- **ARIA snapshots in the app map** — per-route role/name snapshots (ground truth for
+  `getByRole`), selector priority now `getByTestId` → `getByRole` → `getByLabel`/`getByText`
+- **Healer classification** — test fragility → fix; transient environment failure → spec
+  untouched; genuine app bug → assertions kept, `test.fixme` + `BUGS.md` entry (healers patch
+  test fragility, never real bugs)
+- **Config hygiene** — `retries: CI ? 2 : 0`, `trace: 'on-first-retry'`, mock-external-only rule
+
 ## Shipped — v0.3.1 (RBAC-aware generation)
 
 - **UI-first rule** — generated and healed specs must drive user steps through the real UI;
@@ -77,6 +89,8 @@ Directional. Shape may change; not committed.
 - Parallel spec execution for larger apps
 - Machine- and human-readable reports — JUnit XML / `$GITHUB_STEP_SUMMARY` for CI,
   single-file HTML with diff artifacts inline `help wanted`
+- Live selector validation at generation time — verify generated locators against the
+  running app before accepting a spec
 - A review workflow for auto-generated baselines
 - Seeded fixture data — stable dataset for baselines and mutating tests
 - Opt-in screenshot in the healing prompt (`--with-screens`) — healing already spends tokens;

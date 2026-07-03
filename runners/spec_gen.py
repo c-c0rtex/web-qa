@@ -32,7 +32,7 @@ from explore import load_project, resolve_credentials
 from run_scenarios import split_tcs, tc_roles
 
 
-MAX_CONTEXT_CHARS = 15000
+MAX_CONTEXT_CHARS = 24000
 GEN_ATTEMPTS = 2  # initial + one retry with playwright parse error fed back
 
 DEFAULT_AUTH_HINT = (
@@ -49,6 +49,7 @@ PROJECT CONTEXT:
 - Backend API base URL: {backend_url}
 - Test credentials: email="{login_email}" password="{login_password}"
 - AUTH FLOW (follow EXACTLY, do not invent cookies or headers): {auth_login_hint}
+{seed_section}
 
 APP MAP (auto-crawled; REAL routes, form fields, button labels and table headers — trust it over guesses):
 {app_context}
@@ -61,7 +62,9 @@ REQUIREMENTS:
 - Authenticate at the start of the test following the AUTH FLOW above verbatim
 - Convert each step in the TC to one or more Playwright actions
 - Add `expect(...)` assertions covering the Expected bullets
-- Prefer `page.getByRole`, `page.getByLabel`, `page.getByText` over CSS selectors
+- Selector priority: 1) `getByTestId` when the APP MAP shows a data-testid for the element,
+  2) `getByRole` with the accessible name (the ARIA snapshots in the APP MAP are ground truth
+  for role/name), 3) `getByLabel` / `getByText`. NEVER CSS classes, XPath or positional nth()
 - Selector texts/labels MUST come from the APP MAP above when the route is listed there — do not invent button captions
 - For navigation ALWAYS: `await page.goto('{frontend_url}<path>', {{ waitUntil: 'domcontentloaded' }})` —
   never the default 'load' and never 'networkidle': Next.js dev keeps an HMR websocket open, so
@@ -70,6 +73,8 @@ REQUIREMENTS:
   (`await expect(locator).toBeVisible()`) auto-wait and are the correct sync point; for
   navigation waits use `page.waitForURL(...)`
 - For backend assertions: `const r = await page.request.get(...); expect(r.status()).toBe(200)`
+- Mock EXTERNAL third-party dependencies only (payments, outside APIs). NEVER mock or stub
+  your own app's backend — the test must exercise the real stack
 - Do not hardcode IDs — use `?` if TC is generic about which entity, or pick a plausible id
 - Keep the spec self-contained; no external helpers
 
@@ -181,6 +186,15 @@ def load_app_context(proj_dir: Path) -> str:
     return ctx
 
 
+def load_seed(proj_dir: Path) -> str:
+    """Optional committed .web-qa/seed.spec.ts — human-verified auth/setup code. Far stronger
+    grounding than a prose auth hint: the model reuses working patterns instead of inventing."""
+    p = proj_dir / ".web-qa" / "seed.spec.ts"
+    if not p.is_file():
+        return ""
+    return p.read_text(encoding="utf-8")[:6000]
+
+
 def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path) -> tuple[str, str | None]:
     """Generate + validate one spec. Returns (tc_key, error_or_None)."""
     attempt_prompt = prompt
@@ -217,8 +231,14 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     auth_login_hint = proj.get("auth_login_hint") or DEFAULT_AUTH_HINT
     login_email, login_password = resolve_credentials(proj, None, None)
     app_context = load_app_context(proj_dir)
-    # Cache key covers everything that shapes the output: TC body + template + app map + urls
-    env_hash = tc_hash(PROMPT_TEMPLATE + app_context + frontend_url + backend_url)
+    seed = load_seed(proj_dir)
+    seed_section = (
+        "\nKNOWN-GOOD SEED SPEC (human-verified code from THIS repo — reuse its auth/setup "
+        "patterns VERBATIM instead of inventing your own):\n```ts\n" + seed + "\n```\n"
+        if seed else ""
+    )
+    # Cache key covers everything that shapes the output: TC body + template + app map + seed + urls
+    env_hash = tc_hash(PROMPT_TEMPLATE + app_context + seed + frontend_url + backend_url)
 
     md_files = sorted(scenarios_dir.glob("*.md"))
     if not md_files:
@@ -264,6 +284,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 login_password=tc_password,
                 test_data_prefix=test_data_prefix,
                 auth_login_hint=auth_login_hint,
+                seed_section=seed_section,
                 app_context=app_context,
                 tc_body=f"## {tc_id} — {tc.get('name', '')}\n\n{tc.get('body', '')}",
             )
