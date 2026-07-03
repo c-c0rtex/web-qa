@@ -65,7 +65,26 @@ bin/web-qa-explore --alias my-app          # crawl → <project>/.web-qa/app.con
 
 Set up the per-project specs runner (once — see SKILL.md, "Per-project specs runner setup").
 
-## Everyday use
+## Talking to your agent
+
+web-qa is a skill: normally you don't type the CLI yourself — you ask your coding agent, and it drives the pipeline. Prompts that work well:
+
+| You say | The agent does |
+|---|---|
+| *"Set up web-qa for this project"* | registers the project, asks for credentials, runs `doctor`, crawls the app map, sets up the specs runner |
+| *"Is web-qa healthy here?"* | `web-qa-doctor --alias …` and explains any ❌ |
+| *"Test that checkout works"* | generates scenarios for the flow, shows you the markdown test plan, runs it, reports with screenshots |
+| *"Did my branch break anything?"* | `generate --diff main` → specs → matrix → verdict with the failing tests explained |
+| *"Run the full regression before I deploy"* | `web-qa-matrix` → exit code, route coverage, flaky list |
+| *"I changed the role permissions — check all roles"* | RBAC directive kicks in: allowed+denied TC pairs per role, matrix `--roles admin,editor,viewer` |
+| *"Test the mobile version of the orders page"* | `explore --viewport mobile` (mobile app map) → mobile scenarios → `run --viewport mobile` with its own baselines |
+| *"This test keeps failing, fix it"* | `maintain` — proposes a healed spec from the real error output; applies only if you say so |
+| *"The redesign is intentional — update the baselines"* | `run --update-baseline` |
+| *"Show me how /orders looks right now"* | takes a screenshot, reads it, describes what it sees |
+
+The agent-facing contract (which command for which intent, business rules, config keys) lives in [SKILL.md](SKILL.md) — that's what your agent reads when the skill activates.
+
+## Everyday use (CLI)
 
 | Command | Purpose |
 |---|---|

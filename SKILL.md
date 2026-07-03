@@ -14,6 +14,21 @@ Agent skill for testing web applications: E2E + visual regression + a11y + scena
 - "What's broken in this branch?" — full Exploration + Generation + Run
 - pre-push / pre-deploy gate — `web-qa-matrix` runs everything and returns an exit code
 
+## User intent → workflow (recognize these)
+
+| User says (any phrasing) | Do |
+|---|---|
+| "set up / onboard web-qa here" | Onboarding workflow below (register → creds → doctor → explore → specs runner) |
+| "is it healthy / why is it broken" | `web-qa-doctor --alias <a>`, explain failures, apply hints |
+| "test <feature>" / "check that <flow> works" | `generate --task` → show the md plan → run passive and/or spec-gen+run |
+| "did my branch/diff break anything" | `generate --diff <ref>` → spec-gen → matrix → explain failures |
+| "full regression / can I deploy" | `web-qa-matrix` → report gate verdict, coverage, flaky |
+| "I changed permissions/roles — verify" | `generate --diff` (RBAC directive fires) → matrix `--roles <all>` — never test just one role |
+| "test the mobile version" | `explore --viewport mobile` if no mobile map yet → generate → `run --viewport mobile` / matrix `--viewports` |
+| "this test is failing, fix it" | `maintain` (propose); `--apply` only with explicit user consent |
+| "the UI change is intentional" | `run --update-baseline` |
+| "show me page X / verify visually" | screenshot → Read → describe (see Screenshots section) |
+
 ## Architecture
 
 ```
