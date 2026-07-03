@@ -25,17 +25,31 @@ from spec_gen import call_claude, load_app_context, slugify
 
 MAX_DIFF_CHARS = 9000
 
-RE_RBAC_DIFF = re.compile(
-    r"permission|\brole\b|\broles\b|\bscope|hasPermission|require_scope|\bacl\b|\brbac\b|can_edit|is_admin",
+# Content signal: precise access-control tokens only. Bare `role`/`scope` are deliberately
+# absent — they false-positive on ARIA `role="dialog"` and `<th scope="col">` markup.
+RE_RBAC_CONTENT = re.compile(
+    r"hasPermission|require_scope|\bis_admin\b|\bcan_(?:edit|delete|create|view|manage)\b"
+    r"|\bpermissions?\b|\brbac\b|\bacl\b",
     re.IGNORECASE,
+)
+# Filename signal (git --stat lines look like " app/backend/roles.py | 10 ++--"):
+# a path containing auth/role/permission is a near-certain access-control change.
+RE_RBAC_FILES = re.compile(
+    r"^\s*[\w/.-]*(?:auth|role|permission|perm|acl|rbac)[\w/.-]*\s*\|",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 RBAC_DIRECTIVE = """
-RBAC DIRECTIVE — the change touches permissions/roles. For EVERY affected role generate a PAIR:
+RBAC DIRECTIVE — this change LOOKS like it touches permissions/roles. First verify by reading
+the diff: if the matches are incidental (ARIA `role=` attributes, CSS, `<th scope>` markup),
+IGNORE this directive and test the change normally. If it really is access control:
+For EVERY affected role generate a PAIR:
 - allowed-path TC: the role sees the control and completes the action THROUGH THE UI
 - denied-path TC: the control is absent/disabled in the UI AND direct access (URL open or
   API call) is rejected (403 / redirect) — assert BOTH
 Annotate each with `**Role:** <name>`. Cover every role listed above, not just one.
+If the project has only ONE role, the denied-path is the UNAUTHENTICATED visitor instead:
+direct URL → redirect to login, API call → 401 (no `**Role:**` annotation needed).
 """
 
 PROMPT = """You are a senior QA engineer writing test-case scenarios for a web app.
@@ -121,7 +135,7 @@ def main() -> int:
     role_names = [r.get("name") for r in proj.get("roles") or [] if r.get("name")]
     roles_section = (f"\nPROJECT ROLES (accounts exist for each): {', '.join(role_names)}\n"
                      if role_names else "")
-    if RE_RBAC_DIFF.search(source_section) and role_names:
+    if role_names and (RE_RBAC_FILES.search(source_section) or RE_RBAC_CONTENT.search(source_section)):
         source_section += RBAC_DIRECTIVE
 
     out_path = scenarios_dir / (args.out or default_name)

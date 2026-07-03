@@ -300,6 +300,25 @@ def test_history_flags_flaky(tmp_path):
     assert len(json.loads((d / "history.json").read_text())) == 3
 
 
+# ---------- gen_scenarios ----------
+
+def test_rbac_trigger_ignores_aria_and_table_markup():
+    from gen_scenarios import RE_RBAC_CONTENT, RE_RBAC_FILES
+    aria_diff = '+  <div role="dialog" aria-modal="true">\n+  <th scope="col">Name</th>'
+    assert not RE_RBAC_CONTENT.search(aria_diff)
+    assert not RE_RBAC_FILES.search(aria_diff)
+
+
+def test_rbac_trigger_fires_on_real_access_control():
+    from gen_scenarios import RE_RBAC_CONTENT, RE_RBAC_FILES
+    assert RE_RBAC_CONTENT.search("+  if (!hasPermission(user, 'orders', 'edit')) return null;")
+    assert RE_RBAC_CONTENT.search("+    require_scope_for_method(scope='orders')")
+    assert RE_RBAC_CONTENT.search("changed the permission model for editors")
+    stat = "Files changed:\n app/backend/app/roles.py        | 24 ++++---\n app/frontend/lib/auth.ts        |  8 +-"
+    assert RE_RBAC_FILES.search(stat)
+    assert not RE_RBAC_FILES.search(" app/frontend/components/table.tsx | 5 +--")
+
+
 # ---------- maintain ----------
 
 def test_failing_specs_extracted_with_errors():

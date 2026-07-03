@@ -500,7 +500,7 @@ wheels = [
 
 [[package]]
 name = "web-qa"
-version = "0.3.0"
+version = "0.3.1"
 source = { virtual = "." }
 dependencies = [
     { name = "httpx" },
