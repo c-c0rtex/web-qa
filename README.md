@@ -1,4 +1,19 @@
-# web-qa
+<h1 align="center">web-qa</h1>
+
+<p align="center">
+  Autonomous web-app QA skill for Claude Code —<br>
+  explore once, generate specs, run with zero tokens.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/github/actions/workflow/status/c-c0rtex/web-qa/ci.yml?style=flat-square&label=CI" alt="CI">
+  <img src="https://img.shields.io/badge/version-0.1.0-blue?style=flat-square" alt="Version 0.1.0">
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
+  <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/uv-managed-DE5FE9?style=flat-square" alt="uv">
+  <img src="https://img.shields.io/badge/Playwright-1.55+-2EAD33?style=flat-square&logo=playwright&logoColor=white" alt="Playwright 1.55+">
+  <img src="https://img.shields.io/badge/Claude%20Code-skill-D97757?style=flat-square" alt="Claude Code Skill">
+</p>
 
 Autonomous web-app QA skill for [Claude Code](https://claude.com/claude-code): Playwright E2E, visual regression, axe-core accessibility — with test scenarios auto-generated from a git diff or a plain-text task, specs grounded in a real crawled map of your app, and a self-healing loop for failing tests.
 

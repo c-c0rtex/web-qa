@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Lint (ruff)
+        run: uv run ruff check runners tests
+
+      - name: Unit tests
+        run: uv run pytest -q
+
+      - name: Cache playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+
+      - name: install.sh smoke
+        run: ./install.sh
+
+      - name: CLI smoke
+        run: |
+          bin/web-qa-resolve-project --alias my-app
+          # matrix on the example project must fail cleanly with exit 2 (no tests found)
+          rc=0; bin/web-qa-matrix --alias my-app --list || rc=$?
+          test "$rc" -eq 2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Playwright config template parses
+        run: |
+          mkdir -p /tmp/proj/.web-qa/specs
+          cp playwright.config.template.ts /tmp/proj/.web-qa/playwright.config.ts
+          cd /tmp/proj/.web-qa
+          printf '{"name":"web-qa-specs","private":true}\n' > package.json
+          npm install -D @playwright/test --no-fund --no-audit
+          cat > specs/dummy.spec.ts <<'EOF'
+          import { test, expect } from '@playwright/test';
+          test('dummy', async () => { expect(1).toBe(1); });
+          EOF
+          npx playwright test --list
