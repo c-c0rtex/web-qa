@@ -94,6 +94,10 @@ Useful environment variables:
 
 A 30-test-case project costs roughly one medium Claude conversation to fully automate, then runs for free.
 
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) — near-term: manual-edit-safe app maps, `web-qa-doctor` preflight, ARIA-snapshot-driven healing. Items marked `help wanted` are good first contributions.
+
 ## Attribution
 
 MIT-licensed. If you use this project or build on it, a link back to [github.com/c-c0rtex/web-qa](https://github.com/c-c0rtex/web-qa) is appreciated — it's the only thing asked for.
