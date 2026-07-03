@@ -12,7 +12,8 @@ Inputs:
   --login email password  (optional; if absent, project config.json's auth fields are used)
   --max-pages 30    crawl cap
 
-Output: <project>/.web-qa/app.context.md (overwrites)
+Output: <project>/.web-qa/app.context.md — regenerated on every run, EXCEPT everything
+below the `<!-- manual -->` marker, which survives re-crawls (hand-written notes live there).
 """
 
 from __future__ import annotations
@@ -72,6 +73,37 @@ def resolve_credentials(proj: dict, email: str | None, password: str | None,
             f"or set \"auth\": {{\"email\", \"password\"}} (and optionally \"roles\") in projects.json"
         )
     return email, password
+
+
+DEFAULT_VIEWPORT = {"width": 1280, "height": 900}
+MANUAL_MARKER = "<!-- manual -->"
+
+
+def project_viewport(proj: dict) -> dict:
+    """Per-project `viewport` from config, with a consistent default across all layers."""
+    vp = proj.get("viewport") or {}
+    return {"width": int(vp.get("width", DEFAULT_VIEWPORT["width"])),
+            "height": int(vp.get("height", DEFAULT_VIEWPORT["height"]))}
+
+
+def viewport_env(proj: dict) -> str | None:
+    """WIDTHxHEIGHT string for the WEBQA_VIEWPORT env var (specs config),
+    or None when the project doesn't set a viewport."""
+    if not proj.get("viewport"):
+        return None
+    vp = project_viewport(proj)
+    return f"{vp['width']}x{vp['height']}"
+
+
+def merge_manual_section(new_md: str, existing_md: str | None) -> str:
+    """Everything below MANUAL_MARKER in app.context.md survives re-crawls.
+    First write scaffolds the marker so the feature is discoverable."""
+    if existing_md and MANUAL_MARKER in existing_md:
+        manual = existing_md[existing_md.index(MANUAL_MARKER):].rstrip()
+    else:
+        manual = (MANUAL_MARKER + "\n<!-- Everything below this marker survives `web-qa-explore` re-crawls.\n"
+                  "     Add business rules, roles, corner cases the crawler can't see. -->")
+    return new_md.rstrip() + "\n\n" + manual + "\n"
 
 
 def api_login(backend_url: str, email: str, password: str) -> tuple[dict, dict]:
@@ -166,7 +198,7 @@ def normalize_for_dedup(url: str) -> str:
 
 
 def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
-          per_template: int = 2) -> list[dict]:
+          per_template: int = 2, viewport: dict | None = None) -> list[dict]:
     """BFS over same-origin URLs, return list of page summaries.
     Visits at most `per_template` concrete URLs per normalized route template so
     entity cards (/orders/1, /orders/2, …) don't eat the whole max_pages budget."""
@@ -179,7 +211,7 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(storage_state=storage_state, viewport={"width": 1280, "height": 900})
+        ctx = browser.new_context(storage_state=storage_state, viewport=viewport or DEFAULT_VIEWPORT)
         page = ctx.new_page()
 
         while queue and len(pages) < max_pages:
@@ -371,13 +403,16 @@ def main() -> int:
     storage = cookies_to_storage_state(cookies, target)
     openapi = fetch_openapi(backend)
 
-    print(f"[explore] crawling {target} (max_pages={args.max_pages})", file=sys.stderr)
-    pages = crawl(target, storage, max_pages=args.max_pages)
+    viewport = project_viewport(proj)
+    print(f"[explore] crawling {target} (max_pages={args.max_pages}, "
+          f"viewport={viewport['width']}x{viewport['height']})", file=sys.stderr)
+    pages = crawl(target, storage, max_pages=args.max_pages, viewport=viewport)
     print(f"[explore] crawled {len(pages)} pages", file=sys.stderr)
 
     md = render_context_md(proj, pages, openapi, user_me)
     out = Path(proj["path"]) / ".web-qa" / "app.context.md"
-    out.write_text(md)
+    existing = out.read_text() if out.is_file() else None
+    out.write_text(merge_manual_section(md, existing))
     print(json.dumps({"alias": args.alias, "pages_crawled": len(pages), "out": str(out), "size": out.stat().st_size}, ensure_ascii=False))
     return 0
 

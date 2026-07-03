@@ -25,7 +25,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from explore import load_project
+from explore import load_project, viewport_env
 from spec_gen import call_claude, validate_spec, load_app_context, postprocess_spec
 
 FIX_PROMPT = """You are fixing a FAILING Playwright TypeScript spec for an existing web app.
@@ -53,8 +53,11 @@ Output the corrected .spec.ts now:
 """
 
 
-def run_playwright_json(webqa: Path, out_json: Path, workers: int | None) -> None:
+def run_playwright_json(webqa: Path, out_json: Path, workers: int | None,
+                        viewport: str | None = None) -> None:
     env = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=str(out_json))
+    if viewport:
+        env["WEBQA_VIEWPORT"] = viewport
     cmd = ["npx", "playwright", "test", "--reporter=json"]
     if workers:
         cmd.append(f"--workers={workers}")
@@ -151,7 +154,7 @@ def main() -> int:
         report_path = webqa / "reports" / "maintain-playwright-results.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         print("[maintain] running playwright to collect failures…", file=sys.stderr)
-        run_playwright_json(webqa, report_path, args.pw_workers)
+        run_playwright_json(webqa, report_path, args.pw_workers, viewport_env(proj))
     if not report_path.is_file():
         print(json.dumps({"error": f"no report at {report_path}"}), file=sys.stderr)
         return 2

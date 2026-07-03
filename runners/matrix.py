@@ -33,7 +33,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from explore import load_project
+from explore import load_project, viewport_env
 from run_scenarios import split_tcs, extract_paths, classify, DEFAULT_BACKEND_PREFIXES
 
 SKILL = Path(__file__).resolve().parent.parent
@@ -108,7 +108,8 @@ def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = 
     return data["report"]
 
 
-def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: int | None = None) -> None:
+def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: int | None = None,
+                    viewport: str | None = None) -> None:
     """Run playwright on exactly the inventoried spec files, fold statuses into spec_rows."""
     if not (webqa / "playwright.config.ts").is_file():
         for r in spec_rows:
@@ -119,6 +120,8 @@ def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: 
     log_path = run_dir / "playwright.log"
     files = [f"specs/{r['file']}" for r in spec_rows]
     env = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=str(out_json))
+    if viewport:
+        env["WEBQA_VIEWPORT"] = viewport  # picked up by playwright.config.template.ts
     # json → file via env; line-reporter → live progress in playwright.log (tail -f to watch)
     cmd = ["npx", "playwright", "test", "--reporter=line,json"]
     if workers:
@@ -373,7 +376,7 @@ def main() -> int:
             snapshot(f"passive{label}")
     if spec_rows and not args.skip_specs:
         print(f"[matrix] specs stage: {len(spec_rows)} spec files", file=sys.stderr)
-        run_specs_stage(webqa, spec_rows, run_dir, args.workers)
+        run_specs_stage(webqa, spec_rows, run_dir, args.workers, viewport_env(proj))
         snapshot("specs")
 
     flaky_keys = update_history(webqa, run_id, rows)

@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/c-c0rtex/web-qa/ci.yml?style=flat-square&label=CI" alt="CI">
-  <img src="https://img.shields.io/badge/version-0.1.0-blue?style=flat-square" alt="Version 0.1.0">
+  <img src="https://img.shields.io/badge/version-0.2.0-blue?style=flat-square" alt="Version 0.2.0">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/uv-managed-DE5FE9?style=flat-square" alt="uv">
@@ -69,6 +69,7 @@ Set up the per-project specs runner (once — see SKILL.md, "Per-project specs r
 
 | Command | Purpose |
 |---|---|
+| `web-qa-doctor --alias my-app` | Preflight: deps, browser, servers, credentials, setup — run first |
 | `web-qa-generate --alias my-app --diff main` | Test scenarios for whatever your branch changed |
 | `web-qa-generate --alias my-app --task "date filter on /orders"` | Scenarios from a plain-text task |
 | `web-qa-spec-gen --alias my-app --all` | Scenarios → Playwright specs (parallel, validated) |
@@ -102,7 +103,7 @@ A 30-test-case project costs roughly one medium Claude conversation to fully aut
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) — near-term: manual-edit-safe app maps, `web-qa-doctor` preflight, ARIA-snapshot-driven healing. Items marked `help wanted` are good first contributions.
+See [ROADMAP.md](ROADMAP.md) — near-term: cross-agent support (`WEBQA_LLM_CMD` for Codex/Gemini/Kimi CLIs) and flake-aware healing with ARIA snapshots. Items marked `help wanted` are good first contributions.
 
 ## Attribution
 

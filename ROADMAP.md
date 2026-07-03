@@ -6,6 +6,17 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.2.0 (hardening)
+
+- **Manual-edit-safe app map** — everything below the `<!-- manual -->` marker in
+  `app.context.md` survives `web-qa-explore` re-crawls; the marker is scaffolded on first write
+- **`web-qa-doctor`** — one-command preflight: deps, chromium build, LLM CLI, registry,
+  project path/config, frontend/backend reachability, login (including every role),
+  app map / scenarios / specs-runner setup. Exit 0/1
+- **Configurable viewport** — per-project `viewport` config applied consistently to the
+  crawler, the passive runner and the specs config (`WEBQA_VIEWPORT`); default unified
+  at 1280×900 across all layers (previously hardcoded and inconsistent)
+
 ## Shipped — v0.1.0
 
 - **Explore once** — crawls the app into a cached map (`app.context.md`)
@@ -18,18 +29,6 @@ _Last updated: 2026-07_
 - **CI** — GitHub Actions: ruff lint + unit tests + install/CLI smoke
 
 ## Next
-
-### v0.2 — hardening
-
-- [ ] **Manual-edit-safe app map** — re-running `web-qa-explore` overwrites hand-written notes
-  in `app.context.md`; everything below a `<!-- manual -->` marker must survive re-crawls
-  *(known flaw)*
-- [ ] **`web-qa-doctor`** — one-command preflight: config valid, target/backend reachable,
-  credentials work, chromium build cached, LLM CLI on PATH. Every onboarding issue so far
-  would have been caught by it
-- [ ] **Configurable viewport** — per-project `viewport` in config, applied consistently across
-  explore, the passive runner and the specs config (today: hardcoded, and inconsistent
-  between layers)
 
 ### v0.3 — cross-agent & smarter healing
 

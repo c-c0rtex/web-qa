@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# One-command preflight: environment (+ project with --alias).
+# Exit 0 = healthy (warnings allowed), 1 = hard failure found.
+# Usage: web-qa-doctor [--alias <name>] [--json]
+set -e
+SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
+exec uv run --project "$SKILL" python "$SKILL/runners/doctor.py" "$@"

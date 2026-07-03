@@ -4,7 +4,14 @@ import json
 
 import pytest
 
-from explore import normalize_for_dedup, render_context_md, resolve_credentials
+from explore import (
+    merge_manual_section,
+    normalize_for_dedup,
+    project_viewport,
+    render_context_md,
+    resolve_credentials,
+    viewport_env,
+)
 from matrix import collect_specs, compute_coverage, routes_from_context, row_key, update_history
 from maintain import failing_specs_from_report
 from run_scenarios import classify, extract_paths, infer_root_path, materialize_path, split_tcs, visual_diff_pct
@@ -46,6 +53,31 @@ def test_render_context_md_includes_openapi_request_schemas():
     }
     md = render_context_md({"alias": "t", "target_url": "http://x"}, [], openapi, {})
     assert "POST body: model_name*:string, quantity:integer" in md
+
+
+def test_merge_manual_section_scaffolds_marker_on_first_write():
+    out = merge_manual_section("# map\ncontent", None)
+    assert out.startswith("# map\ncontent\n\n<!-- manual -->")
+    assert "survives" in out
+
+
+def test_merge_manual_section_preserves_hand_written_notes():
+    existing = "# old map\nstale\n\n<!-- manual -->\n## Business rules\n- only admins delete\n"
+    out = merge_manual_section("# new map\nfresh", existing)
+    assert "stale" not in out
+    assert "fresh" in out
+    assert "- only admins delete" in out
+    # idempotent: a second re-crawl keeps the same manual tail
+    again = merge_manual_section("# newer map", out)
+    assert again.count("<!-- manual -->") == 1
+    assert "- only admins delete" in again
+
+
+def test_project_viewport_and_env():
+    assert project_viewport({}) == {"width": 1280, "height": 900}
+    assert project_viewport({"viewport": {"width": 390, "height": 844}}) == {"width": 390, "height": 844}
+    assert viewport_env({}) is None
+    assert viewport_env({"viewport": {"width": 390, "height": 844}}) == "390x844"
 
 
 # ---------- run_scenarios ----------

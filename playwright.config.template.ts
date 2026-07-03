@@ -15,6 +15,12 @@
  */
 import { defineConfig, devices } from '@playwright/test';
 
+// WEBQA_VIEWPORT ("1280x900") is set by web-qa-matrix / web-qa-maintain from the
+// project's `viewport` config key, so specs see the same window as the crawler
+// and the passive runner. Falls back to the web-qa default.
+const [vpWidth, vpHeight] = (process.env.WEBQA_VIEWPORT ?? '1280x900')
+  .split('x').map(Number);
+
 export default defineConfig({
   testDir: './specs',
   testMatch: '**/*.spec.ts',
@@ -30,7 +36,7 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     video: 'off',
     headless: true,
-    viewport: { width: 1920, height: 1080 },
+    viewport: { width: vpWidth, height: vpHeight },
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },

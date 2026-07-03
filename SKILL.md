@@ -95,6 +95,7 @@ Shared runners, project specifics in two places:
   - `test_data_prefix` — name prefix for test entities that mutating specs create/delete themselves (policy: never touch real data). Default: `"QA-"`
   - `gate_exclude` — spec globs excluded from the deploy matrix (features hidden on prod behind flags/build-args), e.g. `["analytics*"]`. Default: empty
   - `language` — language for generated scenario steps (default `"English"`)
+  - `viewport` — `{"width": W, "height": H}`, applied consistently to the crawler, the passive runner AND the specs config (via `WEBQA_VIEWPORT`, set automatically by matrix/maintain). Default: 1280×900 everywhere. Changing it invalidates visual baselines (size-mismatch) — re-run `--update-baseline` after
 
 Env: `WEBQA_CLAUDE_MODEL=sonnet|opus` — model for internal `claude -p` calls (spec-gen / generate / maintain); defaults to the CLI default. `WEBQA_WORKERS=N` — Playwright workers in the template config. `WEBQA_GEN_TIMEOUT=N` — seconds per spec generation (default 300).
 
@@ -105,8 +106,9 @@ Env: `WEBQA_CLAUDE_MODEL=sonnet|opus` — model for internal `claude -p` calls (
 | CLI | What it does |
 |---|---|
 | `web-qa-register-project <alias> --target-url <url> [--backend-url <url>]` | Register a project, scaffold `.web-qa/` |
+| `web-qa-doctor [--alias <a>] [--json]` | **Preflight**: deps, chromium build, LLM CLI, registry; with `--alias` also project path/config, frontend/backend reachability, login (incl. every role), app map, scenarios, specs-runner setup. Exit 0 = healthy, 1 = hard failure. Run it FIRST when anything misbehaves |
 | `web-qa-resolve-project [path] [--alias <a>] [--json]` | cwd/alias → project record |
-| `web-qa-explore --alias <a> [--max-pages N]` | Crawl → app.context.md. Dedup: query params and numeric ids collapse, max 2 entity cards per route template |
+| `web-qa-explore --alias <a> [--max-pages N]` | Crawl → app.context.md. Dedup: query params and numeric ids collapse, max 2 entity cards per route template. Everything below the `<!-- manual -->` marker in app.context.md survives re-crawls — hand-written notes go there |
 | `web-qa-generate --alias <a> (--diff <ref> \| --task "...") [--out f.md] [--prefix X] [--force]` | Scenario md from git diff or task text via `claude -p`, strict TC format, validated for `## TC-…` headers |
 | `web-qa-run --alias <a> [--scenarios "<glob>"] [--role <r>] [--update-baseline] [--visual-threshold N]` | Passive scenario run: goto + visible-text vs Expected (30% threshold) + axe + visual. Mutating TCs marked MANUAL |
 | `web-qa-spec-gen --alias <a> [--all] [--tc <id>] [--force] [--workers N]` | Generate `.spec.ts` from TCs via `claude -p` (parallel, default 3 workers). App map embedded in the prompt; every spec validated with `playwright test --list`, 1 retry with the error fed back. Cache covers TC + prompt + context |
@@ -176,6 +178,7 @@ pixel diff. **Visual judgment is YOUR job as the orchestrating agent:**
 
 | Symptom | Diagnosis / fix |
 |---|---|
+| Anything misbehaves | `web-qa-doctor --alias <a>` first — it catches every issue below |
 | `alias not found` | Register via `web-qa-register-project`, check `projects.json` |
 | `no credentials for '<alias>'` | Fill `auth` (and optionally `roles`) in `projects.json` |
 | `web-qa-spec-gen` → «claude CLI not found» | Claude Code CLI must be on PATH (`which claude`) |

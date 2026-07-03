@@ -26,7 +26,7 @@ from pathlib import Path
 import httpx
 from playwright.sync_api import sync_playwright, ConsoleMessage, Response
 
-from explore import load_project, api_login, cookies_to_storage_state, resolve_credentials
+from explore import load_project, api_login, cookies_to_storage_state, project_viewport, resolve_credentials
 
 
 def now_run_id() -> str:
@@ -434,7 +434,7 @@ def main() -> int:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 900})
+        ctx = browser.new_context(storage_state=storage, viewport=project_viewport(proj))
         if AXE_JS:
             ctx.add_init_script(AXE_JS)
         page = ctx.new_page()
