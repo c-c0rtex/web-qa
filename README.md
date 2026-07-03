@@ -21,6 +21,12 @@ One skill, many projects: each project keeps its own `.web-qa/` state (scenarios
 
 ## Why
 
+When an AI writes the code, your job shifts to checking it — you're the QA now. The obvious next move is to let the AI test its own work, and that's the trap: a model that misread the requirement will happily write a test that passes on the misread. Green check, bug intact — automated self-confirmation, not QA.
+
+web-qa keeps the two jobs apart. The model *generates* the checks — it's good at inventing the awkward paths you'd never bother to write — but the verdict comes from a deterministic oracle: a pixel diff, an exit code, `playwright test`. In between sits a plain-markdown test plan a human reviews in minutes, not the day the diff would take.
+
+## How it works
+
 LLM-driven browser testing is usually done by driving a browser through MCP step by step — powerful, but token-hungry. This skill takes a cheaper route:
 
 1. **Explore** — a plain Playwright crawler logs in and maps your app once: routes, forms, real button labels, table headers, OpenAPI request schemas → `app.context.md` (cached in your repo).
