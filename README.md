@@ -88,7 +88,8 @@ Useful environment variables:
 ## Token cost, honestly
 
 - Exploration, running tests, the matrix, visual diff, a11y: **zero tokens** — plain Python + Playwright.
-- Spec generation: one `claude -p` call per test case (prompt ≈ app map + TC, roughly 10–20k tokens each), cached — regeneration only happens when the TC, the prompt, or the app map changes.
+- Visual regression is an algorithmic pixel diff against a committed baseline — no vision model looks at your screenshots. Screenshots are saved as run artifacts for you (or your agent) to inspect.
+- Spec generation: one `claude -p` call per test case (prompt ≈ app map + TC, roughly 10–20k tokens each), cached — regeneration only happens when the TC, the prompt, or the app map changes. Text-only: generation is grounded in the crawled app map, not in screenshots.
 - Healing: one call per failing spec.
 
 A 30-test-case project costs roughly one medium Claude conversation to fully automate, then runs for free.
