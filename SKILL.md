@@ -147,6 +147,21 @@ Pin `@playwright/test` to an exact version: every version pins an exact browser 
 2. In a deploy script: `web-qa-matrix --alias <a> && ./deploy.sh`
 3. Convention: `_`-prefixed specs are ad-hoc debug — excluded from the gate; prod-hidden features via `gate_exclude`
 
+## Screenshots and visual judgment (for the agent)
+
+The pipeline itself never sends screenshots to a model — visual regression is an algorithmic
+pixel diff. **Visual judgment is YOUR job as the orchestrating agent:**
+
+- Every passive run saves a per-page screenshot into `reports/<run>/` (named `<TC>-<route>.png`);
+  Playwright specs keep failure screenshots and traces under `.web-qa/test-results/`.
+- **Read those images** before reporting a finding: a screenshot confirms or refutes a suspected
+  bug far better than matched keywords. Screenshot → Read → judge → only then report.
+- When the user asks "show me how page X looks" or "verify this visually" — take an ad-hoc
+  screenshot: for public pages `uv run playwright screenshot <url> shot.png`; for authenticated
+  pages run the relevant scenario (`web-qa-run --scenarios <file>`) and Read its artifacts.
+- Visual regression failures come with both the current screenshot and the baseline in
+  `baseline/` — Read both and say what actually changed, not just the diff percentage.
+
 ## Business rules
 
 - **Never auto-fix found product bugs.** Report only; the user decides.
