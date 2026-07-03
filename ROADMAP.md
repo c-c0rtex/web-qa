@@ -47,6 +47,9 @@ Directional. Shape may change; not committed.
 
 - Richer assertions beyond DOM / pixel / a11y — network assertions, console-error gating,
   performance budgets
+- API testing from OpenAPI — a deterministic contract layer (schemathesis integration,
+  zero tokens) + LLM-generated API flow scenarios (`web-qa-generate --api`), endpoint
+  coverage in the matrix
 - Responsive testing — viewports as a matrix dimension (Playwright device descriptors),
   per-viewport baselines, mobile-aware exploration
 - Parallel spec execution for larger apps
