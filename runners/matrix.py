@@ -33,7 +33,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from explore import load_project, viewport_env
+from explore import load_project, viewport_entry, viewport_env
 from run_scenarios import split_tcs, extract_paths, classify, DEFAULT_BACKEND_PREFIXES
 
 SKILL = Path(__file__).resolve().parent.parent
@@ -83,12 +83,15 @@ def collect_specs(webqa: Path, include_adhoc: bool,
 
 # ---------- stages ----------
 
-def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = None) -> str | None:
+def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = None,
+                      viewport: str | None = None) -> str | None:
     """Run run_scenarios.py, fold statuses back into scenario_rows. Returns report path or None."""
     cmd = [str(SKILL / ".venv" / "bin" / "python"), str(SKILL / "runners" / "run_scenarios.py"),
            "--alias", alias]
     if role:
         cmd += ["--role", role]
+    if viewport:
+        cmd += ["--viewport", viewport]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     try:
         data = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -109,7 +112,7 @@ def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = 
 
 
 def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: int | None = None,
-                    viewport: str | None = None) -> None:
+                    viewport: str | None = None, mobile_device: str | None = None) -> None:
     """Run playwright on exactly the inventoried spec files, fold statuses into spec_rows."""
     if not (webqa / "playwright.config.ts").is_file():
         for r in spec_rows:
@@ -122,6 +125,8 @@ def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: 
     env = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=str(out_json))
     if viewport:
         env["WEBQA_VIEWPORT"] = viewport  # picked up by playwright.config.template.ts
+    if mobile_device:
+        env["WEBQA_MOBILE_DEVICE"] = mobile_device  # adds a `mobile` project in the template config
     # json → file via env; line-reporter → live progress in playwright.log (tail -f to watch)
     cmd = ["npx", "playwright", "test", "--reporter=line,json"]
     if workers:
@@ -229,6 +234,19 @@ def compute_coverage(webqa: Path, scenario_rows: list[dict], spec_rows: list[dic
             "uncovered": uncovered}
 
 
+def coverage_by_role(webqa: Path, scenario_rows: list[dict]) -> dict:
+    """Per-role route coverage — "this route was never tested as viewer". Specs are
+    excluded: they authenticate with their own hardcoded account, not a matrix role."""
+    role_names = sorted({r["role"] for r in scenario_rows if r.get("role", "-") != "-"})
+    out: dict = {}
+    for role in role_names:
+        rows_r = [r for r in scenario_rows if r["role"] == role]
+        cov = compute_coverage(webqa, rows_r, [])
+        out[role] = {"covered": cov["covered"], "total": cov["routes_total"],
+                     "uncovered": cov["uncovered"]}
+    return out
+
+
 # ---------- history / flaky ----------
 
 HISTORY_KEEP = 20
@@ -236,7 +254,7 @@ FLAKY_WINDOW = 5
 
 
 def row_key(r: dict) -> str:
-    return f"{r['source']}:{r['file']}:{r['id']}:{r.get('role', '-')}"
+    return f"{r['source']}:{r['file']}:{r['id']}:{r.get('role', '-')}:{r.get('viewport', '-')}"
 
 
 def update_history(webqa: Path, run_id: str, rows: list[dict]) -> set[str]:
@@ -268,7 +286,8 @@ GATE_BLOCKING = ("fail", "error")
 
 
 def render_matrix_md(alias: str, run_id: str, rows: list[dict], stats: dict, gate_ok: bool,
-                     coverage: dict, flaky_keys: set[str]) -> str:
+                     coverage: dict, flaky_keys: set[str],
+                     role_coverage: dict | None = None) -> str:
     lines = [
         f"# Test Matrix — {alias}",
         f"\n_Run: {run_id} UTC_",
@@ -283,14 +302,19 @@ def render_matrix_md(alias: str, run_id: str, rows: list[dict], stats: dict, gat
         lines.append(f"\n**Route coverage:** {coverage['covered']}/{coverage['routes_total']} routes have tests")
         if coverage["uncovered"]:
             lines.append("Uncovered: " + ", ".join(f"`{r}`" for r in coverage["uncovered"]))
-    lines.append("\n| # | Source | File | TC | Role | Kind | Status | Note |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    for role, rc in (role_coverage or {}).items():
+        line = f"- role `{role}`: {rc['covered']}/{rc['total']}"
+        if rc["uncovered"]:
+            line += " — uncovered: " + ", ".join(f"`{r}`" for r in rc["uncovered"][:8])
+        lines.append(line)
+    lines.append("\n| # | Source | File | TC | Role | VP | Kind | Status | Note |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for i, r in enumerate(rows, 1):
         note = (r.get("note", "") or "").replace("|", "\\|")[:120]
         emoji = STATUS_EMOJI.get(r["status"], "?")
         flaky_mark = " 🔁" if row_key(r) in flaky_keys else ""
         lines.append(f"| {i} | {r['source']} | {r['file']} | {r['id']} | {r.get('role', '-')} "
-                     f"| {r['kind']} | {emoji} {r['status']}{flaky_mark} | {note} |")
+                     f"| {r.get('viewport', '-')} | {r['kind']} | {emoji} {r['status']}{flaky_mark} | {note} |")
     return "\n".join(lines) + "\n"
 
 
@@ -304,6 +328,9 @@ def main() -> int:
     ap.add_argument("--workers", type=int, help="playwright --workers (default: project config)")
     ap.add_argument("--roles", help="comma-separated role names from config `roles`; "
                                     "passive stage runs once per role (RBAC matrix)")
+    ap.add_argument("--viewports", help="comma-separated viewport names from config `viewports`; "
+                                        "passive stage runs once per viewport (responsive matrix); "
+                                        "a device-entry also runs specs under mobile emulation")
 
     args = ap.parse_args()
 
@@ -312,14 +339,19 @@ def main() -> int:
     backend_prefixes = tuple(proj.get("backend_prefixes") or DEFAULT_BACKEND_PREFIXES)
 
     roles = [r.strip() for r in args.roles.split(",") if r.strip()] if args.roles else [None]
-    role_sets: list[tuple[str | None, list[dict]]] = []
+    viewports = [v.strip() for v in args.viewports.split(",") if v.strip()] if args.viewports else [None]
+    combo_sets: list[tuple[str | None, str | None, list[dict]]] = []
     scenario_rows: list[dict] = []
     for role in roles:
-        rws = collect_scenario_tcs(webqa, backend_prefixes)
-        for r in rws:
-            r["role"] = role or "-"
-        role_sets.append((role, rws))
-        scenario_rows.extend(rws)
+        for vp in viewports:
+            rws = collect_scenario_tcs(webqa, backend_prefixes)
+            for r in rws:
+                r["role"] = role or "-"
+                r["viewport"] = vp or "-"
+            combo_sets.append((role, vp, rws))
+            scenario_rows.extend(rws)
+    # a requested device-viewport (e.g. iPhone) also turns on the mobile project for specs
+    mobile_device = next((viewport_entry(proj, v).get("device") for v in viewports if v), None)
     spec_rows, gate_excluded = collect_specs(webqa, args.include_adhoc,
                                              proj.get("gate_exclude") or [])
     for r in spec_rows:
@@ -333,11 +365,12 @@ def main() -> int:
         return 2
 
     coverage = compute_coverage(webqa, scenario_rows, spec_rows)
+    role_coverage = coverage_by_role(webqa, scenario_rows)
 
     if args.list:
         print(json.dumps({"total": len(rows), "scenario_tcs": len(scenario_rows),
                           "specs": len(spec_rows), "gate_excluded": gate_excluded,
-                          "coverage": coverage,
+                          "coverage": coverage, "role_coverage": role_coverage,
                           "rows": rows}, ensure_ascii=False, indent=2))
         return 0
 
@@ -355,10 +388,11 @@ def main() -> int:
             stats[r["status"]] = stats.get(r["status"], 0) + 1
         gate_ok = not any(r["status"] in GATE_BLOCKING for r in rows)
         matrix_md.write_text(render_matrix_md(proj["alias"], run_id, rows, stats, gate_ok,
-                                              coverage, flaky_keys))
+                                              coverage, flaky_keys, role_coverage))
         (run_dir / "matrix.json").write_text(json.dumps({
             "run_id": run_id, "alias": proj["alias"], "stage": stage, "gate_ok": gate_ok,
-            "stats": stats, "coverage": coverage, "flaky": sorted(flaky_keys),
+            "stats": stats, "coverage": coverage, "role_coverage": role_coverage,
+            "flaky": sorted(flaky_keys),
             "gate_excluded": gate_excluded,
             "roles": [r or "default" for r in roles],
             "passive_reports": passive_reports, "rows": rows,
@@ -367,16 +401,16 @@ def main() -> int:
 
     snapshot("inventory")  # durable from second zero, statuses filled in as stages finish
     if scenario_rows and not args.skip_passive:
-        for role, rws in role_sets:
-            label = f" (role {role})" if role else ""
+        for role, vp, rws in combo_sets:
+            label = "".join([f" (role {role})" if role else "", f" (viewport {vp})" if vp else ""])
             print(f"[matrix] passive stage{label}: {len(rws)} TC", file=sys.stderr)
-            rep = run_passive_stage(args.alias, rws, role)
+            rep = run_passive_stage(args.alias, rws, role, vp)
             if rep:
                 passive_reports.append(rep)
             snapshot(f"passive{label}")
     if spec_rows and not args.skip_specs:
         print(f"[matrix] specs stage: {len(spec_rows)} spec files", file=sys.stderr)
-        run_specs_stage(webqa, spec_rows, run_dir, args.workers, viewport_env(proj))
+        run_specs_stage(webqa, spec_rows, run_dir, args.workers, viewport_env(proj), mobile_device)
         snapshot("specs")
 
     flaky_keys = update_history(webqa, run_id, rows)

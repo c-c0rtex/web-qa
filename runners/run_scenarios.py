@@ -26,7 +26,15 @@ from pathlib import Path
 import httpx
 from playwright.sync_api import sync_playwright, ConsoleMessage, Response
 
-from explore import load_project, api_login, cookies_to_storage_state, project_viewport, resolve_credentials
+from explore import (
+    api_login,
+    context_kwargs_for,
+    cookies_to_storage_state,
+    load_project,
+    resolve_credentials,
+    viewport_entry,
+    viewport_suffix,
+)
 
 
 def now_run_id() -> str:
@@ -261,10 +269,10 @@ def apply_visual_masks(page, mask_selectors: list[str]) -> None:
         print(f"[visual] mask failed: {e}", file=sys.stderr)
 
 
-def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids: dict, reports_dir: Path,
+def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids: dict, reports_dir: Path,  # noqa: PLR0913
                    baseline_dir: Path, update_baseline: bool, visual_threshold: float,
                    backend_prefixes: tuple[str, ...], route_hints: list[dict],
-                   visual_masks: list[str], visual_exclude: list[str]) -> dict:
+                   visual_masks: list[str], visual_exclude: list[str], vp_suffix: str = "") -> dict:
     body = tc["body"]
     fronts, backs = extract_paths(body, backend_prefixes)
     expected = expected_keywords(body)
@@ -291,7 +299,7 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
             except Exception:
                 pass  # SPA with polling never goes idle — bounded wait is enough
             visible_text = page.inner_text("body").lower()
-            shot_key = path.strip("/").replace("/", "_").replace("{", "_").replace("}", "_") or "root"
+            shot_key = (path.strip("/").replace("/", "_").replace("{", "_").replace("}", "_") or "root") + vp_suffix
             shot = reports_dir / f"{tc['id']}-{shot_key}.png"
             apply_visual_masks(page, visual_masks)
             page.screenshot(path=str(shot), full_page=False)
@@ -384,6 +392,8 @@ def main() -> int:
     ap.add_argument("--email")
     ap.add_argument("--password")
     ap.add_argument("--role", help="named role from project config `roles` (RBAC runs)")
+    ap.add_argument("--viewport", help="named viewport from config `viewports`; "
+                                       "non-default gets its own baseline set (@name suffix)")
     ap.add_argument("--scenarios", help="Glob within .web-qa/scenarios/. Default: *.md")
     ap.add_argument("--include-mutating", action="store_true",
                     help="Attempt to run mutating TCs (placeholder; spec-gen not implemented)")
@@ -402,7 +412,8 @@ def main() -> int:
     id_discovery = proj.get("id_discovery") or []
     visual_masks = proj.get("visual_masks") or []
     visual_exclude = proj.get("visual_exclude") or []
-    run_id = now_run_id() + (f"-{args.role}" if args.role else "")
+    run_id = now_run_id() + (f"-{args.role}" if args.role else "") + (f"-{args.viewport}" if args.viewport else "")
+    vp_suffix = viewport_suffix(proj, args.viewport)
     reports = project_path / ".web-qa" / "reports" / run_id
     reports.mkdir(parents=True, exist_ok=True)
     baseline_dir = project_path / ".web-qa" / "baseline"
@@ -434,7 +445,8 @@ def main() -> int:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(storage_state=storage, viewport=project_viewport(proj))
+        ctx = browser.new_context(storage_state=storage,
+                                  **context_kwargs_for(viewport_entry(proj, args.viewport), p))
         if AXE_JS:
             ctx.add_init_script(AXE_JS)
         page = ctx.new_page()
@@ -467,7 +479,8 @@ def main() -> int:
 
                 res = run_passive_tc(tc, page, target, backend, cookies, ids, reports,
                                      baseline_dir, args.update_baseline, args.visual_threshold,
-                                     backend_prefixes, route_hints, visual_masks, visual_exclude)
+                                     backend_prefixes, route_hints, visual_masks, visual_exclude,
+                                     vp_suffix)
                 res["scenario_file"] = sf.name
                 all_results.append(res)
                 print(f"  {res['id']}: {res['status']} ({len(res.get('a11y_critical', []))} a11y critical)", file=sys.stderr)
@@ -523,6 +536,7 @@ def main() -> int:
     (reports / "results.json").write_text(json.dumps({
         "run_id": run_id,
         "role": args.role,
+        "viewport": args.viewport,
         "by_status": by_status,
         "a11y_total": a11y_total,
         "results": all_results,

@@ -156,10 +156,18 @@ def validate_spec(webqa: Path, out_path: Path) -> str | None:
 
 
 def load_app_context(proj_dir: Path) -> str:
-    ctx_path = proj_dir / ".web-qa" / "app.context.md"
-    if not ctx_path.is_file():
+    """Main app map plus any viewport-specific maps (app.context.<name>.md from
+    `web-qa-explore --viewport <name>`) — mobile TCs need the mobile DOM, not guesses."""
+    webqa = proj_dir / ".web-qa"
+    parts: list[str] = []
+    main = webqa / "app.context.md"
+    if main.is_file():
+        parts.append(main.read_text(encoding="utf-8"))
+    for extra in sorted(webqa.glob("app.context.*.md")):
+        parts.append(extra.read_text(encoding="utf-8"))
+    if not parts:
         return "(no app.context.md — run web-qa-explore first for grounded selectors)"
-    ctx = ctx_path.read_text(encoding="utf-8")
+    ctx = "\n\n".join(parts)
     if len(ctx) > MAX_CONTEXT_CHARS:
         ctx = ctx[:MAX_CONTEXT_CHARS] + "\n…(truncated)"
     return ctx

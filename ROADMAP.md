@@ -6,6 +6,19 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.3.0 (responsive & RBAC depth)
+
+- **Viewports as a matrix dimension** — config `viewports` (named sizes or Playwright device
+  descriptors: touch, mobile UA, DPR); `--viewport` on explore/run, `--viewports` on the matrix
+  (crossed with `--roles`); per-viewport visual baselines (`@name` suffix, default stays
+  unsuffixed)
+- **Mobile-aware exploration** — `web-qa-explore --viewport mobile` writes
+  `app.context.<name>.md`; spec generation reads all maps, so mobile TCs target the mobile DOM
+- **Specs under mobile emulation** — a device viewport adds a `mobile` playwright project
+  (`WEBQA_MOBILE_DEVICE`) next to chromium
+- **Route coverage × roles** — the matrix reports per-role uncovered routes
+  ("this route was never tested as `viewer`")
+
 ## Shipped — v0.2.0 (hardening)
 
 - **Manual-edit-safe app map** — everything below the `<!-- manual -->` marker in
@@ -30,7 +43,7 @@ _Last updated: 2026-07_
 
 ## Next
 
-### v0.3 — cross-agent & smarter healing
+### v0.4 — cross-agent & smarter healing
 
 - [ ] **Cross-agent support** — decouple generation from the `claude -p` binary behind a
   configurable command (`WEBQA_LLM_CMD`), so the same skill runs under Codex CLI, Gemini CLI,
@@ -49,14 +62,11 @@ Directional. Shape may change; not committed.
 - API testing from OpenAPI — a deterministic contract layer (schemathesis integration,
   zero tokens) + LLM-generated API flow scenarios (`web-qa-generate --api`), endpoint
   coverage in the matrix
-- Responsive testing — viewports as a matrix dimension (Playwright device descriptors),
-  per-viewport baselines, mobile-aware exploration
 - Parallel spec execution for larger apps
 - Machine- and human-readable reports — JUnit XML / `$GITHUB_STEP_SUMMARY` for CI,
   single-file HTML with diff artifacts inline `help wanted`
 - A review workflow for auto-generated baselines
 - Seeded fixture data — stable dataset for baselines and mutating tests
-- Route coverage × roles — "this route was never tested as `viewer`"
 - Opt-in screenshot in the healing prompt (`--with-screens`) — healing already spends tokens;
   the run phase stays vision-free
 

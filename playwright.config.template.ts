@@ -40,5 +40,11 @@ export default defineConfig({
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    // WEBQA_MOBILE_DEVICE ("iPhone 14") is set by web-qa-matrix when a device-viewport
+    // is requested (--viewports incl. a `device` entry) — specs then run under real
+    // mobile emulation (touch, UA, DPR) as a second project.
+    ...(process.env.WEBQA_MOBILE_DEVICE
+      ? [{ name: 'mobile', use: { ...devices[process.env.WEBQA_MOBILE_DEVICE] } }]
+      : []),
   ],
 });

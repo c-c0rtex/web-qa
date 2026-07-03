@@ -95,6 +95,48 @@ def viewport_env(proj: dict) -> str | None:
     return f"{vp['width']}x{vp['height']}"
 
 
+def viewport_entries(proj: dict) -> list[dict]:
+    """Named viewports from config `viewports`; falls back to the single `viewport`
+    key (v0.2) or the default. First entry is the project default."""
+    vps = proj.get("viewports")
+    if vps:
+        return vps
+    return [{"name": "default", **project_viewport(proj)}]
+
+
+def viewport_entry(proj: dict, name: str | None = None) -> dict:
+    entries = viewport_entries(proj)
+    if not name:
+        return entries[0]
+    for e in entries:
+        if e.get("name") == name:
+            return e
+    known = [e.get("name") for e in entries]
+    raise SystemExit(f"viewport {name!r} not found; known viewports: {known}")
+
+
+def context_kwargs_for(entry: dict, playwright) -> dict:
+    """Playwright new_context kwargs for a viewport entry. `device` entries use the
+    full descriptor (touch, user-agent, deviceScaleFactor) — real mobile emulation,
+    not just a narrow window."""
+    device = entry.get("device")
+    if device:
+        descriptor = playwright.devices.get(device)
+        if not descriptor:
+            raise SystemExit(f"unknown Playwright device {device!r} (see playwright.devices)")
+        return dict(descriptor)
+    return {"viewport": {"width": int(entry.get("width", DEFAULT_VIEWPORT["width"])),
+                         "height": int(entry.get("height", DEFAULT_VIEWPORT["height"]))}}
+
+
+def viewport_suffix(proj: dict, name: str | None) -> str:
+    """Baseline/report suffix: the project-default viewport keeps unsuffixed names
+    (backward compatible), every other viewport gets `@<name>`."""
+    if not name or name == viewport_entries(proj)[0].get("name"):
+        return ""
+    return f"@{name}"
+
+
 def merge_manual_section(new_md: str, existing_md: str | None) -> str:
     """Everything below MANUAL_MARKER in app.context.md survives re-crawls.
     First write scaffolds the marker so the feature is discoverable."""
@@ -198,7 +240,8 @@ def normalize_for_dedup(url: str) -> str:
 
 
 def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
-          per_template: int = 2, viewport: dict | None = None) -> list[dict]:
+          per_template: int = 2, viewport: dict | None = None,
+          context_kwargs: dict | None = None) -> list[dict]:
     """BFS over same-origin URLs, return list of page summaries.
     Visits at most `per_template` concrete URLs per normalized route template so
     entity cards (/orders/1, /orders/2, …) don't eat the whole max_pages budget."""
@@ -211,7 +254,8 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(storage_state=storage_state, viewport=viewport or DEFAULT_VIEWPORT)
+        kwargs = context_kwargs if context_kwargs is not None else {"viewport": viewport or DEFAULT_VIEWPORT}
+        ctx = browser.new_context(storage_state=storage_state, **kwargs)
         page = ctx.new_page()
 
         while queue and len(pages) < max_pages:
@@ -389,6 +433,8 @@ def main() -> int:
     ap.add_argument("--email")
     ap.add_argument("--password")
     ap.add_argument("--max-pages", type=int, default=30)
+    ap.add_argument("--viewport", help="named viewport from config `viewports` "
+                                       "(non-default writes app.context.<name>.md)")
     args = ap.parse_args()
 
     proj = load_project(args.alias)
@@ -403,14 +449,22 @@ def main() -> int:
     storage = cookies_to_storage_state(cookies, target)
     openapi = fetch_openapi(backend)
 
-    viewport = project_viewport(proj)
-    print(f"[explore] crawling {target} (max_pages={args.max_pages}, "
-          f"viewport={viewport['width']}x{viewport['height']})", file=sys.stderr)
-    pages = crawl(target, storage, max_pages=args.max_pages, viewport=viewport)
+    entry = viewport_entry(proj, args.viewport)
+    suffix = viewport_suffix(proj, args.viewport)
+    # Device descriptors need the playwright instance; resolve inside crawl via kwargs factory
+    from playwright.sync_api import sync_playwright as _sp
+    with _sp() as _p:
+        ctx_kwargs = context_kwargs_for(entry, _p)
+    label = entry.get("device") or f"{ctx_kwargs['viewport']['width']}x{ctx_kwargs['viewport']['height']}"
+    print(f"[explore] crawling {target} (max_pages={args.max_pages}, viewport={label})", file=sys.stderr)
+    pages = crawl(target, storage, max_pages=args.max_pages, context_kwargs=ctx_kwargs)
     print(f"[explore] crawled {len(pages)} pages", file=sys.stderr)
 
     md = render_context_md(proj, pages, openapi, user_me)
-    out = Path(proj["path"]) / ".web-qa" / "app.context.md"
+    if suffix:
+        md = md.replace("— App Context", f"— App Context ({entry.get('name')} viewport)", 1)
+    out_name = f"app.context{suffix.replace('@', '.')}.md" if suffix else "app.context.md"
+    out = Path(proj["path"]) / ".web-qa" / out_name
     existing = out.read_text() if out.is_file() else None
     out.write_text(merge_manual_section(md, existing))
     print(json.dumps({"alias": args.alias, "pages_crawled": len(pages), "out": str(out), "size": out.stat().st_size}, ensure_ascii=False))

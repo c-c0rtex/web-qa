@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/c-c0rtex/web-qa/ci.yml?style=flat-square&label=CI" alt="CI">
-  <img src="https://img.shields.io/badge/version-0.2.0-blue?style=flat-square" alt="Version 0.2.0">
+  <img src="https://img.shields.io/badge/version-0.3.0-blue?style=flat-square" alt="Version 0.3.0">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/uv-managed-DE5FE9?style=flat-square" alt="uv">
@@ -78,7 +78,7 @@ Set up the per-project specs runner (once — see SKILL.md, "Per-project specs r
 | `web-qa-maintain --alias my-app --apply` | Heal failing specs from their real errors |
 | `web-qa-kill` | Clean up orphaned headless browsers after a killed run |
 
-RBAC: define `roles` in `projects.json` and run `web-qa-matrix --roles admin,viewer` — the passive stage runs once per role.
+RBAC and responsive are matrix dimensions: `web-qa-matrix --roles admin,viewer --viewports desktop,mobile` runs the passive stage per combination (mobile = real device emulation: touch, UA, DPR — via Playwright device descriptors), reports per-role route coverage, and a device viewport also runs specs under mobile emulation. Per-viewport visual baselines are kept apart (`@mobile` suffix).
 
 All long runs are durable: the matrix report is rewritten after every stage, Playwright progress streams to a log file, generation failures leave `*.FAILED` markers. If your agent (or you) kill a run, the partial report is already on disk.
 
@@ -103,7 +103,7 @@ A 30-test-case project costs roughly one medium Claude conversation to fully aut
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) — near-term: cross-agent support (`WEBQA_LLM_CMD` for Codex/Gemini/Kimi CLIs) and flake-aware healing with ARIA snapshots. Items marked `help wanted` are good first contributions.
+See [ROADMAP.md](ROADMAP.md) — next: cross-agent support (`WEBQA_LLM_CMD` for Codex/Gemini/Kimi CLIs) and flake-aware healing with ARIA snapshots. Items marked `help wanted` are good first contributions.
 
 ## Attribution
 

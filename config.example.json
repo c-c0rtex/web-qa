@@ -9,6 +9,11 @@
   "language": "English",
   "test_data_prefix": "QA-",
 
+  "viewports": [
+    { "name": "desktop", "width": 1280, "height": 900 },
+    { "name": "mobile", "device": "iPhone 14" }
+  ],
+
   "backend_prefixes": ["/auth", "/api", "/health", "/orders/{", "/admin"],
 
   "route_hints": [

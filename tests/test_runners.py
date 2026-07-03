@@ -5,14 +5,25 @@ import json
 import pytest
 
 from explore import (
+    context_kwargs_for,
     merge_manual_section,
     normalize_for_dedup,
     project_viewport,
     render_context_md,
     resolve_credentials,
+    viewport_entries,
+    viewport_entry,
     viewport_env,
+    viewport_suffix,
 )
-from matrix import collect_specs, compute_coverage, routes_from_context, row_key, update_history
+from matrix import (
+    collect_specs,
+    compute_coverage,
+    coverage_by_role,
+    routes_from_context,
+    row_key,
+    update_history,
+)
 from maintain import failing_specs_from_report
 from run_scenarios import classify, extract_paths, infer_root_path, materialize_path, split_tcs, visual_diff_pct
 from spec_gen import PROMPT_TEMPLATE, postprocess_spec, slugify
@@ -78,6 +89,44 @@ def test_project_viewport_and_env():
     assert project_viewport({"viewport": {"width": 390, "height": 844}}) == {"width": 390, "height": 844}
     assert viewport_env({}) is None
     assert viewport_env({"viewport": {"width": 390, "height": 844}}) == "390x844"
+
+
+VP_PROJ = {"viewports": [
+    {"name": "desktop", "width": 1280, "height": 900},
+    {"name": "mobile", "device": "iPhone 14"},
+]}
+
+
+def test_viewport_entries_fallbacks_and_lookup():
+    # no config at all → single default entry
+    assert viewport_entries({}) == [{"name": "default", "width": 1280, "height": 900}]
+    # v0.2 single `viewport` key still honored
+    assert viewport_entries({"viewport": {"width": 800, "height": 600}})[0]["width"] == 800
+    # named lookup + first-is-default
+    assert viewport_entry(VP_PROJ)["name"] == "desktop"
+    assert viewport_entry(VP_PROJ, "mobile")["device"] == "iPhone 14"
+    with pytest.raises(SystemExit, match="ghost"):
+        viewport_entry(VP_PROJ, "ghost")
+
+
+def test_viewport_suffix_default_unsuffixed():
+    assert viewport_suffix(VP_PROJ, None) == ""
+    assert viewport_suffix(VP_PROJ, "desktop") == ""  # project default keeps old baseline names
+    assert viewport_suffix(VP_PROJ, "mobile") == "@mobile"
+
+
+class _FakePlaywright:
+    devices = {"iPhone 14": {"viewport": {"width": 390, "height": 664}, "is_mobile": True,
+                             "has_touch": True, "user_agent": "Mobile Safari"}}
+
+
+def test_context_kwargs_device_vs_size():
+    kw = context_kwargs_for({"name": "mobile", "device": "iPhone 14"}, _FakePlaywright())
+    assert kw["is_mobile"] and kw["has_touch"] and "Mobile" in kw["user_agent"]
+    kw = context_kwargs_for({"name": "desktop", "width": 800, "height": 600}, _FakePlaywright())
+    assert kw == {"viewport": {"width": 800, "height": 600}}
+    with pytest.raises(SystemExit, match="unknown Playwright device"):
+        context_kwargs_for({"device": "Nokia 3310"}, _FakePlaywright())
 
 
 # ---------- run_scenarios ----------
@@ -185,6 +234,30 @@ def test_route_coverage_with_id_templates(tmp_path):
               "status": "pass", "kind": "spec", "title": "s1"}]
     cov = compute_coverage(d, scen, specs)
     assert cov["covered"] == 2 and cov["uncovered"] == ["/import"]
+
+
+def test_coverage_by_role_finds_role_gaps(tmp_path):
+    d = _webqa(tmp_path)
+    (d / "app.context.md").write_text("| `/orders` | t | h | 1 | 1 | 5 |\n| `/import` | t | h | 1 | 0 | 2 |\n")
+    scen = [
+        {"source": "scenario", "file": "f.md", "id": "TC-1", "paths": ["/orders", "/import"],
+         "role": "admin", "viewport": "-", "status": "pass", "kind": "passive", "title": "t"},
+        {"source": "scenario", "file": "f.md", "id": "TC-1", "paths": ["/orders"],
+         "role": "viewer", "viewport": "-", "status": "pass", "kind": "passive", "title": "t"},
+    ]
+    rc = coverage_by_role(d, scen)
+    assert rc["admin"]["uncovered"] == []
+    assert rc["viewer"]["uncovered"] == ["/import"]
+    # single default role → empty dict, section stays hidden
+    assert coverage_by_role(d, [{"role": "-", "paths": [], "source": "s", "file": "f", "id": "x"}]) == {}
+
+
+def test_row_key_separates_role_and_viewport():
+    base = {"source": "scenario", "file": "f.md", "id": "TC-1"}
+    k1 = row_key({**base, "role": "admin", "viewport": "mobile"})
+    k2 = row_key({**base, "role": "admin", "viewport": "-"})
+    k3 = row_key({**base, "role": "viewer", "viewport": "mobile"})
+    assert len({k1, k2, k3}) == 3
 
 
 def test_history_flags_flaky(tmp_path):
