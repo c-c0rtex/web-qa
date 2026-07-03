@@ -67,6 +67,18 @@ def split_tcs(md: str) -> list[dict]:
     return tcs
 
 
+RE_TC_ROLE = re.compile(r"\*\*Roles?:\*\*\s*([^\n]+)", re.IGNORECASE)
+
+
+def tc_roles(body: str) -> list[str]:
+    """Roles a TC is declared for (`**Role:** viewer` / `**Roles:** admin, editor`).
+    Empty list = role-agnostic, runs under any account."""
+    m = RE_TC_ROLE.search(body)
+    if not m:
+        return []
+    return [r.strip().strip("`").lower() for r in m.group(1).split(",") if r.strip()]
+
+
 def is_backend_path(path: str, backend_prefixes: tuple[str, ...]) -> bool:
     return any(path == p or path.startswith(p) for p in backend_prefixes)
 
@@ -458,6 +470,16 @@ def main() -> int:
             tcs = split_tcs(md)
             print(f"[run] {sf.name}: {len(tcs)} TC", file=sys.stderr)
             for tc in tcs:
+                declared = tc_roles(tc["body"])
+                if declared and (args.role or "").lower() not in declared:
+                    hint = "" if args.role else " — run with --role"
+                    all_results.append({
+                        "id": tc["id"], "title": tc["title"], "kind": "role-specific",
+                        "status": "skip",
+                        "notes": [f"declared for role(s): {', '.join(declared)}{hint}"],
+                        "artifacts": [], "scenario_file": sf.name, "a11y_critical": [],
+                    })
+                    continue
                 fronts_pre, backs_pre = extract_paths(tc["body"], backend_prefixes)
                 kind, reasons = classify(tc["body"], backs_pre)
                 if kind == "mutating" and not args.include_mutating:

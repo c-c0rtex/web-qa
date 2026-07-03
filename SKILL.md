@@ -81,7 +81,7 @@ Agent skill for testing web applications: E2E + visual regression + a11y + scena
 
 Shared runners, project specifics in two places:
 
-- **`<skill root>/projects.json`** (machine-local, NOT in any repo): `alias`, `path`, `target_url`, `backend_url`, **`auth: {email, password}`** — credentials live only here. No hardcoded fallbacks: without auth (or `--email/--password`) runners exit with a clear error. Optional **`roles: [{name, email, password}]`** — named accounts for RBAC runs (`--role manager`, `web-qa-matrix --roles admin,manager`).
+- **`<skill root>/projects.json`** (machine-local, NOT in any repo): `alias`, `path`, `target_url`, `backend_url`, **`auth: {email, password}`** — credentials live only here. No hardcoded fallbacks: without auth (or `--email/--password`) runners exit with a clear error. Optional **`roles: [{name, email, password}]`** — named accounts for RBAC runs (`--role manager`, `web-qa-matrix --roles admin,manager`). TCs annotated `**Role:** <name>` in scenarios run ONLY under that role's combos (spec-gen also logs them in as that role); unannotated TCs are role-agnostic.
 - **`<project>/.web-qa/config.json`** (in the project repo): merged over the registry entry (`null` values ignored). Keys:
   - `stack` — string for the spec-gen prompt (e.g. `"Next.js + FastAPI admin"`, default `"web"`)
   - `backend_prefixes` — paths treated as backend-only (never opened as frontend routes). Default: `/auth`, `/api`, `/health`
@@ -110,7 +110,7 @@ Env: `WEBQA_CLAUDE_MODEL=sonnet|opus` — model for internal `claude -p` calls (
 | `web-qa-doctor [--alias <a>] [--json]` | **Preflight**: deps, chromium build, LLM CLI, registry; with `--alias` also project path/config, frontend/backend reachability, login (incl. every role), app map, scenarios, specs-runner setup. Exit 0 = healthy, 1 = hard failure. Run it FIRST when anything misbehaves |
 | `web-qa-resolve-project [path] [--alias <a>] [--json]` | cwd/alias → project record |
 | `web-qa-explore --alias <a> [--max-pages N] [--viewport <name>]` | Crawl → app.context.md (non-default viewport → `app.context.<name>.md`, both feed spec-gen). Dedup: query params and numeric ids collapse, max 2 entity cards per route template. Everything below the `<!-- manual -->` marker in app.context.md survives re-crawls — hand-written notes go there |
-| `web-qa-generate --alias <a> (--diff <ref> \| --task "...") [--out f.md] [--prefix X] [--force]` | Scenario md from git diff or task text via `claude -p`, strict TC format, validated for `## TC-…` headers |
+| `web-qa-generate --alias <a> (--diff <ref> \| --task "...") [--out f.md] [--prefix X] [--force]` | Scenario md from git diff or task text via `claude -p`, strict TC format, validated for `## TC-…` headers. RBAC-aware: a diff touching permissions/roles fans out into allowed+denied TC pairs per role (`**Role:**` annotations) |
 | `web-qa-run --alias <a> [--scenarios "<glob>"] [--role <r>] [--viewport <name>] [--update-baseline] [--visual-threshold N]` | Passive scenario run: goto + visible-text vs Expected (30% threshold) + axe + visual. Mutating TCs marked MANUAL |
 | `web-qa-spec-gen --alias <a> [--all] [--tc <id>] [--force] [--workers N]` | Generate `.spec.ts` from TCs via `claude -p` (parallel, default 3 workers). App map embedded in the prompt; every spec validated with `playwright test --list`, 1 retry with the error fed back. Cache covers TC + prompt + context |
 | `web-qa-run-specs --alias <a> [-- <playwright args>]` | `npx playwright test` over generated specs |

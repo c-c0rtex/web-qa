@@ -47,6 +47,8 @@ TASK: Output the FULL corrected .spec.ts file. Rules:
 - NEVER use `waitForLoadState('networkidle')` (SPAs with polling never go idle) — replace it with
   web-first assertions (`await expect(locator).toBeVisible()`), `page.waitForURL(...)`, or
   `waitForLoadState('domcontentloaded')`
+- NEVER "fix" a spec by rerouting a UI step through `page.request` — the UI path IS the test;
+  fix the selector/timing instead. API calls stay setup/teardown/verification only
 - If an element genuinely does not exist anymore, replace the step with the closest real equivalent and add a `// MAINT:` comment explaining the change
 
 Output the corrected .spec.ts now:

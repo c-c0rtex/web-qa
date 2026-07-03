@@ -22,10 +22,19 @@ from matrix import (
     coverage_by_role,
     routes_from_context,
     row_key,
+    rows_for_role,
     update_history,
 )
 from maintain import failing_specs_from_report
-from run_scenarios import classify, extract_paths, infer_root_path, materialize_path, split_tcs, visual_diff_pct
+from run_scenarios import (
+    classify,
+    extract_paths,
+    infer_root_path,
+    materialize_path,
+    split_tcs,
+    tc_roles,
+    visual_diff_pct,
+)
 from spec_gen import PROMPT_TEMPLATE, postprocess_spec, slugify
 
 
@@ -168,6 +177,26 @@ def test_split_tcs_parses_headers():
     assert [t["id"] for t in tcs] == ["TC-A1", "TC-B2"]
     assert tcs[0]["title"] == "first case"
     assert "body a" in tcs[0]["body"]
+
+
+def test_tc_roles_parsing():
+    assert tc_roles("**Type:** passive\n**Role:** viewer\n**Steps:**") == ["viewer"]
+    assert tc_roles("**Roles:** admin, `editor`\nbody") == ["admin", "editor"]
+    assert tc_roles("**Role:** Viewer") == ["viewer"]  # normalized to lowercase
+    assert tc_roles("no role here") == []
+
+
+def test_rows_for_role_targets_declared_tcs():
+    rows = [
+        {"id": "TC-1", "roles": []},              # role-agnostic → every combo
+        {"id": "TC-2", "roles": ["viewer"]},      # only the viewer combo
+        {"id": "TC-3", "roles": ["admin", "viewer"]},
+    ]
+    assert [r["id"] for r in rows_for_role(rows, "viewer")] == ["TC-1", "TC-2", "TC-3"]
+    assert [r["id"] for r in rows_for_role(rows, "admin")] == ["TC-1", "TC-3"]
+    assert [r["id"] for r in rows_for_role(rows, "Viewer")] == ["TC-1", "TC-2", "TC-3"]
+    # no --roles → nothing dropped (the runner marks declared TCs as skip with a hint)
+    assert len(rows_for_role(rows, None)) == 3
 
 
 def test_visual_diff_size_mismatch_is_flagged(tmp_path):

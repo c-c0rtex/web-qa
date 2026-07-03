@@ -25,11 +25,24 @@ from spec_gen import call_claude, load_app_context, slugify
 
 MAX_DIFF_CHARS = 9000
 
+RE_RBAC_DIFF = re.compile(
+    r"permission|\brole\b|\broles\b|\bscope|hasPermission|require_scope|\bacl\b|\brbac\b|can_edit|is_admin",
+    re.IGNORECASE,
+)
+
+RBAC_DIRECTIVE = """
+RBAC DIRECTIVE — the change touches permissions/roles. For EVERY affected role generate a PAIR:
+- allowed-path TC: the role sees the control and completes the action THROUGH THE UI
+- denied-path TC: the control is absent/disabled in the UI AND direct access (URL open or
+  API call) is rejected (403 / redirect) — assert BOTH
+Annotate each with `**Role:** <name>`. Cover every role listed above, not just one.
+"""
+
 PROMPT = """You are a senior QA engineer writing test-case scenarios for a web app.
 
 APP MAP (auto-crawled; REAL routes, forms, buttons, tables — target only what exists here):
 {app_context}
-
+{roles_section}
 {source_section}
 
 TASK: Write 3-8 focused test cases covering the change/task above. Golden path first, then
@@ -40,6 +53,7 @@ OUTPUT FORMAT (STRICT — this file is parsed by regex, follow it exactly):
 
 ## TC-{prefix}1 — <short imperative title>
 **Type:** passive|mutating
+**Role:** <role name — ONLY for role-specific TCs; omit for role-agnostic ones>
 **Steps:**
 1. <step>
 2. <step>
@@ -54,6 +68,8 @@ RULES:
 - `Type: passive` = read-only checks; `Type: mutating` = creates/edits/deletes data
 - Frontend paths in backticks: `/orders`. Backend calls as: GET `/orders/facets`
 - Expected bullets must be OBSERVABLE on the page (visible text, table columns, counters)
+- If behaviour differs per role, write SEPARATE TCs annotated `**Role:** <name>` — never mix
+  two roles' expectations in one TC. Unannotated TCs run under the default account
 - Write steps/expected in {language}; keep ids/paths/technical terms as-is
 - Output ONLY the markdown, no commentary before or after
 
@@ -102,12 +118,19 @@ def main() -> int:
         source_section = f"CHANGE UNDER TEST — task description:\n\n{args.task}"
         default_name = f"{slugify(args.task)}.md"
 
+    role_names = [r.get("name") for r in proj.get("roles") or [] if r.get("name")]
+    roles_section = (f"\nPROJECT ROLES (accounts exist for each): {', '.join(role_names)}\n"
+                     if role_names else "")
+    if RE_RBAC_DIFF.search(source_section) and role_names:
+        source_section += RBAC_DIRECTIVE
+
     out_path = scenarios_dir / (args.out or default_name)
     if out_path.exists() and not args.force:
         print(json.dumps({"error": f"{out_path} exists; use --force or --out"}), file=sys.stderr)
         return 2
 
     prompt = PROMPT.format(app_context=load_app_context(proj_dir),
+                           roles_section=roles_section,
                            source_section=source_section, prefix=args.prefix,
                            language=proj.get("language") or "English")
     print(f"[generate] asking claude ({'diff ' + args.diff if args.diff else 'task'})…", file=sys.stderr)

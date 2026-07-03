@@ -6,6 +6,18 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.3.1 (RBAC-aware generation)
+
+- **UI-first rule** — generated and healed specs must drive user steps through the real UI;
+  `page.request` is confined to auth, setup/teardown and side-verification (an API-rerouted
+  test that passes while the UI is broken is a spec bug, and now the prompts say so)
+- **Role-annotated test cases** — `**Role:** viewer` in a TC: the passive runner skips it
+  under other accounts, the matrix schedules it only into matching role combos, and spec
+  generation logs in with that role's credentials
+- **RBAC directive in scenario generation** — a diff touching permissions/roles/scopes fans
+  out into allowed-path + denied-path TC pairs per project role (UI control hidden AND direct
+  access rejected)
+
 ## Shipped — v0.3.0 (responsive & RBAC depth)
 
 - **Viewports as a matrix dimension** — config `viewports` (named sizes or Playwright device

@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from explore import load_project, viewport_entry, viewport_env
-from run_scenarios import split_tcs, extract_paths, classify, DEFAULT_BACKEND_PREFIXES
+from run_scenarios import split_tcs, extract_paths, classify, tc_roles, DEFAULT_BACKEND_PREFIXES
 
 SKILL = Path(__file__).resolve().parent.parent
 
@@ -55,7 +55,7 @@ def collect_scenario_tcs(webqa: Path, backend_prefixes: tuple[str, ...]) -> list
             rows.append({
                 "source": "scenario", "file": md.name, "id": tc["id"],
                 "title": tc["title"], "kind": kind, "status": "not-run",
-                "paths": fronts,
+                "paths": fronts, "roles": tc_roles(tc["body"]),
             })
     return rows
 
@@ -79,6 +79,16 @@ def collect_specs(webqa: Path, include_adhoc: bool,
             "kind": "adhoc" if adhoc else "spec", "status": "not-run",
         })
     return rows, excluded
+
+
+def rows_for_role(rows: list[dict], role: str | None) -> list[dict]:
+    """Role-annotated TCs (`**Role:** viewer`) only enter combos with a matching role —
+    an admin-written Expected must not produce false fails under viewer. With no --roles
+    they stay in (the runner marks them skip with a hint)."""
+    if not role:
+        return rows
+    rl = role.lower()
+    return [r for r in rows if not r.get("roles") or rl in r["roles"]]
 
 
 # ---------- stages ----------
@@ -344,7 +354,7 @@ def main() -> int:
     scenario_rows: list[dict] = []
     for role in roles:
         for vp in viewports:
-            rws = collect_scenario_tcs(webqa, backend_prefixes)
+            rws = rows_for_role(collect_scenario_tcs(webqa, backend_prefixes), role)
             for r in rws:
                 r["role"] = role or "-"
                 r["viewport"] = vp or "-"

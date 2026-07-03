@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, resolve_credentials
-from run_scenarios import split_tcs
+from run_scenarios import split_tcs, tc_roles
 
 
 MAX_CONTEXT_CHARS = 15000
@@ -72,6 +72,14 @@ REQUIREMENTS:
 - For backend assertions: `const r = await page.request.get(...); expect(r.status()).toBe(200)`
 - Do not hardcode IDs — use `?` if TC is generic about which entity, or pick a plausible id
 - Keep the spec self-contained; no external helpers
+
+UI-FIRST RULE (what makes the spec worth anything):
+- Every user-visible step of the TC MUST be performed through the UI — real clicks on real
+  buttons, real form fills, real navigation — exactly as a user would do it
+- Doing the action under test via `page.request` instead of the UI is a SPEC BUG: the test
+  goes green while the actual user path may be broken
+- `page.request` / API calls are allowed ONLY for: authentication, creating/deleting test
+  data (setup/teardown), and side-verification of state AFTER a UI action
 
 MUTATING DATA POLICY (applies when the TC creates/edits/deletes data):
 - NEVER mutate pre-existing data. The test must create its OWN target entity via the backend API
@@ -236,12 +244,24 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 continue
             slug = slugify(tc_id + "-" + tc.get("title", ""))
             out_path = specs_dir / f"{scenario_stem}__{slug}.spec.ts"
+            declared = tc_roles(tc.get("body", ""))
+            if declared:
+                try:
+                    tc_email, tc_password = resolve_credentials(proj, None, None, role=declared[0])
+                except SystemExit:
+                    summary["errors"].append({
+                        "tc": tc_key,
+                        "error": f"TC declares role {declared[0]!r} but projects.json has no such role",
+                    })
+                    continue
+            else:
+                tc_email, tc_password = login_email, login_password
             prompt = PROMPT_TEMPLATE.format(
                 stack=stack,
                 frontend_url=frontend_url,
                 backend_url=backend_url,
-                login_email=login_email,
-                login_password=login_password,
+                login_email=tc_email,
+                login_password=tc_password,
                 test_data_prefix=test_data_prefix,
                 auth_login_hint=auth_login_hint,
                 app_context=app_context,
