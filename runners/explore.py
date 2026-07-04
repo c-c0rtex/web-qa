@@ -32,8 +32,10 @@ from playwright.sync_api import sync_playwright
 
 
 def load_project(alias: str) -> dict:
-    """Registry entry merged with <project>/.web-qa/config.json (project keys win, None ignored)."""
-    reg = Path(__file__).resolve().parent.parent / "projects.json"
+    """Registry entry merged with <project>/.web-qa/config.json (project keys win, None ignored).
+    WEBQA_REGISTRY env overrides the registry path (integration tests, CI)."""
+    import os
+    reg = Path(os.environ.get("WEBQA_REGISTRY") or Path(__file__).resolve().parent.parent / "projects.json")
     entries = json.loads(reg.read_text())
     for e in entries:
         if e.get("alias") == alias:

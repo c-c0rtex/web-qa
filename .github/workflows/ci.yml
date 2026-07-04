@@ -31,6 +31,9 @@ jobs:
       - name: install.sh smoke
         run: ./install.sh
 
+      - name: Integration tests (full pipeline vs fixture app, stub LLM)
+        run: uv run pytest -m integration -q
+
       - name: CLI smoke
         run: |
           bin/web-qa-resolve-project --alias my-app

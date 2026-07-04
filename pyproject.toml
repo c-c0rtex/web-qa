@@ -26,3 +26,7 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: end-to-end pipeline tests against the fixture app (needs chromium); run with -m integration",
+]
