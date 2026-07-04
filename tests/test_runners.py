@@ -366,3 +366,25 @@ def test_failing_specs_extracted_with_errors():
     fails = failing_specs_from_report(report)
     assert list(fails) == ["a.spec.ts"]
     assert "Save" in fails["a.spec.ts"][0]
+
+
+def test_mobile_device_found_after_sizeonly_viewport():
+    # regression: next() must skip size-only entries, not return their None
+    vps = ["desktop", "mobile"]
+    dev = next((d for v in vps if v for d in [viewport_entry(VP_PROJ, v).get("device")] if d), None)
+    assert dev == "iPhone 14"
+
+
+def test_role_names_case_insensitive():
+    proj = {"alias": "x", "auth": {}, "roles": [{"name": "Viewer", "email": "v@v", "password": "p"}]}
+    assert resolve_credentials(proj, None, None, role="viewer") == ("v@v", "p")
+
+
+def test_history_migrates_legacy_keys(tmp_path):
+    d = tmp_path
+    (d / "history.json").write_text(json.dumps(
+        [{"run_id": "old", "statuses": {"scenario:f.md:TC-1:-": "fail"}}]))
+    row = {"source": "scenario", "file": "f.md", "id": "TC-1", "role": "-", "viewport": "-",
+           "status": "pass", "kind": "passive", "title": "t"}
+    flaky = update_history(d, "new", [row])
+    assert row_key(row) in flaky  # old fail + new pass across formats = flaky

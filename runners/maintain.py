@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, viewport_env
-from spec_gen import call_claude, validate_spec, load_app_context, load_seed, postprocess_spec
+from spec_gen import call_claude, validate_spec, load_app_context, load_seed, postprocess_spec, seed_prompt_section
 
 FIX_PROMPT = """You are fixing a FAILING Playwright TypeScript spec for an existing web app.
 The app itself is considered correct — the spec has wrong selectors, timing or assertions.
@@ -215,11 +215,7 @@ def main() -> int:
         return 0
 
     app_context = load_app_context(proj_dir)
-    seed = load_seed(proj_dir)
-    seed_section = (
-        "\nKNOWN-GOOD SEED SPEC (human-verified code from THIS repo — reuse its auth/setup "
-        "patterns VERBATIM):\n```ts\n" + seed + "\n```\n" if seed else ""
-    )
+    seed_section = seed_prompt_section(load_seed(proj_dir))
     summary = {"healed": [], "transient": [], "app_bugs": [], "errors": [],
                "mode": "apply" if args.apply else "propose"}
     print(f"[maintain] {len(fails)} failing spec(s), {args.workers} workers", file=sys.stderr)

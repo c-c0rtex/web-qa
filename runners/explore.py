@@ -57,7 +57,7 @@ def resolve_credentials(proj: dict, email: str | None, password: str | None,
     No hardcoded fallbacks."""
     if role:
         for r in proj.get("roles") or []:
-            if r.get("name") == role:
+            if (r.get("name") or "").lower() == role.lower():
                 email = email or r.get("email")
                 password = password or r.get("password")
                 break

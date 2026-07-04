@@ -275,6 +275,10 @@ def update_history(webqa: Path, run_id: str, rows: list[dict]) -> set[str]:
         history = json.loads(hist_path.read_text()) if hist_path.is_file() else []
     except json.JSONDecodeError:
         history = []
+    # migrate pre-viewport 4-part keys so flaky detection survives the upgrade
+    for h in history:
+        h["statuses"] = {(k + ":-" if k.count(":") == 3 else k): v
+                         for k, v in h.get("statuses", {}).items()}
     history.append({"run_id": run_id, "statuses": {row_key(r): r["status"] for r in rows}})
     history = history[-HISTORY_KEEP:]
     hist_path.write_text(json.dumps(history, ensure_ascii=False))
@@ -361,7 +365,10 @@ def main() -> int:
             combo_sets.append((role, vp, rws))
             scenario_rows.extend(rws)
     # a requested device-viewport (e.g. iPhone) also turns on the mobile project for specs
-    mobile_device = next((viewport_entry(proj, v).get("device") for v in viewports if v), None)
+    mobile_device = next(
+        (d for v in viewports if v for d in [viewport_entry(proj, v).get("device")] if d),
+        None,
+    )
     spec_rows, gate_excluded = collect_specs(webqa, args.include_adhoc,
                                              proj.get("gate_exclude") or [])
     for r in spec_rows:

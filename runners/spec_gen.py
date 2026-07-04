@@ -195,6 +195,14 @@ def load_seed(proj_dir: Path) -> str:
     return p.read_text(encoding="utf-8")[:6000]
 
 
+def seed_prompt_section(seed: str) -> str:
+    """Shared prompt block for the seed spec (spec_gen + maintain edit it in one place)."""
+    if not seed:
+        return ""
+    return ("\nKNOWN-GOOD SEED SPEC (human-verified code from THIS repo — reuse its auth/setup "
+            "patterns VERBATIM instead of inventing your own):\n```ts\n" + seed + "\n```\n")
+
+
 def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path) -> tuple[str, str | None]:
     """Generate + validate one spec. Returns (tc_key, error_or_None)."""
     attempt_prompt = prompt
@@ -232,11 +240,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     login_email, login_password = resolve_credentials(proj, None, None)
     app_context = load_app_context(proj_dir)
     seed = load_seed(proj_dir)
-    seed_section = (
-        "\nKNOWN-GOOD SEED SPEC (human-verified code from THIS repo — reuse its auth/setup "
-        "patterns VERBATIM instead of inventing your own):\n```ts\n" + seed + "\n```\n"
-        if seed else ""
-    )
+    seed_section = seed_prompt_section(seed)
     # Cache key covers everything that shapes the output: TC body + template + app map + seed + urls
     env_hash = tc_hash(PROMPT_TEMPLATE + app_context + seed + frontend_url + backend_url)
 
