@@ -134,9 +134,8 @@ Generated tests, reports, and app maps produced by this tool are yours, no strin
 
 - [axe-core](https://github.com/dequelabs/axe-core) (`runners/axe.min.js`) — © Deque Systems, [MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/), vendored unmodified.
 - [Playwright](https://playwright.dev) — Apache-2.0, installed as a dependency.
+The four-stage pipeline architecture was inspired by [Playwright's test agents](https://playwright.dev) (Planner / Generator / Healer) and [TestDino](https://testdino.com)'s writing on AI-driven Playwright testing. No code or text was copied — the ideas were reimplemented from scratch.
 
 ## License
 
 [MIT](LICENSE) © [c-c0rtex](https://github.com/c-c0rtex)
-
-The four-stage pipeline architecture was inspired by [Playwright's test agents](https://playwright.dev) (Planner / Generator / Healer) and [TestDino](https://testdino.com)'s writing on AI-driven Playwright testing. No code or text was copied — the ideas were reimplemented from scratch.
