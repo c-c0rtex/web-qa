@@ -373,6 +373,15 @@ def main() -> int:
                                              proj.get("gate_exclude") or [])
     for r in spec_rows:
         r["role"] = "-"
+    # role-annotated TCs whose declared roles are outside --roles must not vanish silently —
+    # surface them as skip rows so the inventory stays complete
+    requested = {(r or "").lower() for r in roles if r}
+    if requested:
+        for r in collect_scenario_tcs(webqa, backend_prefixes):
+            if r.get("roles") and not (set(r["roles"]) & requested):
+                r.update(role=",".join(r["roles"]), viewport="-", status="skip",
+                         note="declared roles not included in --roles")
+                scenario_rows.append(r)
     rows = scenario_rows + spec_rows
     if gate_excluded:
         print(f"[matrix] gate_exclude skipped {len(gate_excluded)} spec(s): "
@@ -412,6 +421,7 @@ def main() -> int:
             "flaky": sorted(flaky_keys),
             "gate_excluded": gate_excluded,
             "roles": [r or "default" for r in roles],
+            "viewports": [v or "default" for v in viewports],
             "passive_reports": passive_reports, "rows": rows,
         }, ensure_ascii=False, indent=2))
         return stats, gate_ok

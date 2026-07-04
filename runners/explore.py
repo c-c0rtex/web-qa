@@ -86,15 +86,6 @@ def project_viewport(proj: dict) -> dict:
             "height": int(vp.get("height", DEFAULT_VIEWPORT["height"]))}
 
 
-def viewport_env(proj: dict) -> str | None:
-    """WIDTHxHEIGHT string for the WEBQA_VIEWPORT env var (specs config),
-    or None when the project doesn't set a viewport."""
-    if not proj.get("viewport"):
-        return None
-    vp = project_viewport(proj)
-    return f"{vp['width']}x{vp['height']}"
-
-
 def viewport_entries(proj: dict) -> list[dict]:
     """Named viewports from config `viewports`; falls back to the single `viewport`
     key (v0.2) or the default. First entry is the project default."""
@@ -102,6 +93,20 @@ def viewport_entries(proj: dict) -> list[dict]:
     if vps:
         return vps
     return [{"name": "default", **project_viewport(proj)}]
+
+
+def viewport_env(proj: dict) -> str | None:
+    """WIDTHxHEIGHT string for the WEBQA_VIEWPORT env var (specs config), or None when the
+    project sets no viewport at all. Honors both the single `viewport` key and the first
+    (default) entry of `viewports`; device entries return None — their size comes from the
+    device descriptor via WEBQA_MOBILE_DEVICE."""
+    if not (proj.get("viewport") or proj.get("viewports")):
+        return None
+    e = viewport_entries(proj)[0]
+    if e.get("device"):
+        return None
+    return (f"{int(e.get('width', DEFAULT_VIEWPORT['width']))}"
+            f"x{int(e.get('height', DEFAULT_VIEWPORT['height']))}")
 
 
 def viewport_entry(proj: dict, name: str | None = None) -> dict:
@@ -240,8 +245,7 @@ def normalize_for_dedup(url: str) -> str:
 
 
 def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
-          per_template: int = 2, viewport: dict | None = None,
-          context_kwargs: dict | None = None) -> list[dict]:
+          per_template: int = 2, vp_entry: dict | None = None) -> list[dict]:
     """BFS over same-origin URLs, return list of page summaries.
     Visits at most `per_template` concrete URLs per normalized route template so
     entity cards (/orders/1, /orders/2, …) don't eat the whole max_pages budget."""
@@ -254,7 +258,7 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        kwargs = context_kwargs if context_kwargs is not None else {"viewport": viewport or DEFAULT_VIEWPORT}
+        kwargs = context_kwargs_for(vp_entry, p) if vp_entry else {"viewport": DEFAULT_VIEWPORT}
         ctx = browser.new_context(storage_state=storage_state, **kwargs)
         page = ctx.new_page()
 
@@ -476,13 +480,10 @@ def main() -> int:
 
     entry = viewport_entry(proj, args.viewport)
     suffix = viewport_suffix(proj, args.viewport)
-    # Device descriptors need the playwright instance; resolve inside crawl via kwargs factory
-    from playwright.sync_api import sync_playwright as _sp
-    with _sp() as _p:
-        ctx_kwargs = context_kwargs_for(entry, _p)
-    label = entry.get("device") or f"{ctx_kwargs['viewport']['width']}x{ctx_kwargs['viewport']['height']}"
+    label = entry.get("device") or (f"{entry.get('width', DEFAULT_VIEWPORT['width'])}"
+                                    f"x{entry.get('height', DEFAULT_VIEWPORT['height'])}")
     print(f"[explore] crawling {target} (max_pages={args.max_pages}, viewport={label})", file=sys.stderr)
-    pages = crawl(target, storage, max_pages=args.max_pages, context_kwargs=ctx_kwargs)
+    pages = crawl(target, storage, max_pages=args.max_pages, vp_entry=entry)
     print(f"[explore] crawled {len(pages)} pages", file=sys.stderr)
 
     md = render_context_md(proj, pages, openapi, user_me)

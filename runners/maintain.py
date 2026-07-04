@@ -138,8 +138,11 @@ def record_app_bug(proj_dir: Path, spec_name: str, description: str) -> None:
     bugs = proj_dir / ".web-qa" / "BUGS.md"
     if not bugs.is_file():
         bugs.write_text("# BUGS\n\n")
+    entry = f"[maintain] `{spec_name}`: {description}"
+    if entry in bugs.read_text(encoding="utf-8"):
+        return  # same bug already recorded on a previous run
     with bugs.open("a", encoding="utf-8") as f:
-        f.write(f"- {date.today().isoformat()} [maintain] `{spec_name}`: {description}\n")
+        f.write(f"- {date.today().isoformat()} {entry}\n")
 
 
 def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,

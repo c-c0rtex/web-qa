@@ -34,14 +34,17 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   use: {
     baseURL: 'http://127.0.0.1:3000',
-    trace: 'on-first-retry',
+    // CI: trace on retry only; locally there are no retries — keep traces for failures
+    trace: process.env.CI ? 'on-first-retry' : 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'off',
     headless: true,
-    viewport: { width: vpWidth, height: vpHeight },
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    // viewport must live at PROJECT level: the Desktop Chrome descriptor carries its own
+    // viewport (1280x720) which would silently override the top-level `use.viewport`
+    { name: 'chromium',
+      use: { ...devices['Desktop Chrome'], viewport: { width: vpWidth, height: vpHeight } } },
     // WEBQA_MOBILE_DEVICE ("iPhone 14") is set by web-qa-matrix when a device-viewport
     // is requested (--viewports incl. a `device` entry) — specs then run under real
     // mobile emulation (touch, UA, DPR) as a second project.

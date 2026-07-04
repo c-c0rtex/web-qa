@@ -180,6 +180,11 @@ def load_app_context(proj_dir: Path) -> str:
         parts.append(extra.read_text(encoding="utf-8"))
     if not parts:
         return "(no app.context.md — run web-qa-explore first for grounded selectors)"
+    # a huge main map must not tail-truncate the viewport maps appended after it
+    if len(parts) > 1:
+        main_budget = MAX_CONTEXT_CHARS * 2 // 3
+        if len(parts[0]) > main_budget:
+            parts[0] = parts[0][:main_budget] + "\n…(main map truncated)"
     ctx = "\n\n".join(parts)
     if len(ctx) > MAX_CONTEXT_CHARS:
         ctx = ctx[:MAX_CONTEXT_CHARS] + "\n…(truncated)"
@@ -262,12 +267,6 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
             if not all_tcs and not is_mutating(tc):
                 summary["skipped_passive"].append(tc_key)
                 continue
-            body_hash = tc_hash(tc.get("body", "") + env_hash)
-            if not force and cache.get(tc_key) == body_hash:
-                summary["skipped_cached"].append(tc_key)
-                continue
-            slug = slugify(tc_id + "-" + tc.get("title", ""))
-            out_path = specs_dir / f"{scenario_stem}__{slug}.spec.ts"
             declared = tc_roles(tc.get("body", ""))
             if declared:
                 try:
@@ -280,6 +279,12 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                     continue
             else:
                 tc_email, tc_password = login_email, login_password
+            body_hash = tc_hash(tc.get("body", "") + env_hash + tc_email + tc_password)
+            if not force and cache.get(tc_key) == body_hash:
+                summary["skipped_cached"].append(tc_key)
+                continue
+            slug = slugify(tc_id + "-" + tc.get("title", ""))
+            out_path = specs_dir / f"{scenario_stem}__{slug}.spec.ts"
             prompt = PROMPT_TEMPLATE.format(
                 stack=stack,
                 frontend_url=frontend_url,

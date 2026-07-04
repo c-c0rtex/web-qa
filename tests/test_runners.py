@@ -26,7 +26,6 @@ from matrix import (
     update_history,
 )
 from maintain import classify_heal_output, failing_specs_from_report, record_app_bug
-from spec_gen import load_seed
 from run_scenarios import (
     classify,
     extract_paths,
@@ -36,7 +35,7 @@ from run_scenarios import (
     tc_roles,
     visual_diff_pct,
 )
-from spec_gen import PROMPT_TEMPLATE, postprocess_spec, slugify
+from spec_gen import PROMPT_TEMPLATE, load_seed, postprocess_spec, slugify
 
 
 # ---------- explore ----------
@@ -388,3 +387,17 @@ def test_history_migrates_legacy_keys(tmp_path):
            "status": "pass", "kind": "passive", "title": "t"}
     flaky = update_history(d, "new", [row])
     assert row_key(row) in flaky  # old fail + new pass across formats = flaky
+
+
+def test_viewport_env_honors_viewports_list():
+    assert viewport_env(VP_PROJ) == "1280x900"          # first entry = default
+    assert viewport_env({"viewports": [{"name": "m", "device": "iPhone 14"}]}) is None
+    assert viewport_env({}) is None
+
+
+def test_record_app_bug_dedupes(tmp_path):
+    (tmp_path / ".web-qa").mkdir()
+    record_app_bug(tmp_path, "a.spec.ts", "same bug")
+    record_app_bug(tmp_path, "a.spec.ts", "same bug")
+    text = (tmp_path / ".web-qa" / "BUGS.md").read_text()
+    assert text.count("same bug") == 1

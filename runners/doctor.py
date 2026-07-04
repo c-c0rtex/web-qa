@@ -17,9 +17,6 @@ import json
 import shutil
 from pathlib import Path
 
-import httpx
-
-from explore import load_project, resolve_credentials, api_login, project_viewport
 
 SKILL = Path(__file__).resolve().parent.parent
 
@@ -88,6 +85,7 @@ def check_environment(results: list[dict]) -> None:
 # ---------- project ----------
 
 def http_ok(url: str, timeout: float = 5.0) -> tuple[bool, str]:
+    import httpx
     try:
         r = httpx.get(url, timeout=timeout, follow_redirects=True)
         return r.status_code < 500, f"HTTP {r.status_code}"
@@ -96,6 +94,8 @@ def http_ok(url: str, timeout: float = 5.0) -> tuple[bool, str]:
 
 
 def check_project(results: list[dict], alias: str) -> None:
+    # imported lazily so a broken env fails in the deps CHECK, not with a traceback on startup
+    from explore import api_login, load_project, resolve_credentials, viewport_entries
     try:
         proj = load_project(alias)
     except SystemExit as e:
@@ -113,9 +113,12 @@ def check_project(results: list[dict], alias: str) -> None:
         return
     check(results, ".web-qa dir", OK, str(webqa))
 
-    vp = project_viewport(proj)
-    check(results, "viewport", OK, f"{vp['width']}x{vp['height']}"
-          + ("" if proj.get("viewport") else " (default)"))
+    entries = viewport_entries(proj)
+    desc = ", ".join((e.get("device") or f"{e.get('width')}x{e.get('height')}")
+                     + (" (default)" if i == 0 and len(entries) > 1 else "")
+                     for i, e in enumerate(entries))
+    configured = bool(proj.get("viewport") or proj.get("viewports"))
+    check(results, "viewport", OK, desc + ("" if configured else " (default)"))
 
     # reachability
     target = proj.get("target_url")
