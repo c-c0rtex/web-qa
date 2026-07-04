@@ -72,7 +72,7 @@ web-qa is a skill: normally you don't type the CLI yourself — you ask your cod
 | You say | The agent does |
 |---|---|
 | *"Set up web-qa for this project"* | registers the project, asks for credentials, runs `doctor`, crawls the app map, sets up the specs runner |
-| *"Is web-qa healthy here?"* | `web-qa-doctor --alias …` and explains any ❌ |
+| *"Is web-qa healthy here?"* | `web-qa-doctor --alias …` — one ✅/⚠️/❌ line per check; the agent explains the failing ones |
 | *"Test that checkout works"* | generates scenarios for the flow, shows you the markdown test plan, runs it, reports with screenshots |
 | *"Did my branch break anything?"* | `generate --diff main` → specs → matrix → verdict with the failing tests explained |
 | *"Run the full regression before I deploy"* | `web-qa-matrix` → exit code, route coverage, flaky list |
