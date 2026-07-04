@@ -34,6 +34,7 @@ def check_environment(results: list[dict]) -> None:
     # python deps (we're running under the project env, so imports prove the sync)
     try:
         import playwright  # noqa: F401
+        import httpx  # noqa: F401
         import PIL  # noqa: F401
         import numpy  # noqa: F401
         check(results, "python deps", OK, "playwright, httpx, pillow, numpy importable")
@@ -85,8 +86,8 @@ def check_environment(results: list[dict]) -> None:
 # ---------- project ----------
 
 def http_ok(url: str, timeout: float = 5.0) -> tuple[bool, str]:
-    import httpx
     try:
+        import httpx
         r = httpx.get(url, timeout=timeout, follow_redirects=True)
         return r.status_code < 500, f"HTTP {r.status_code}"
     except Exception as e:

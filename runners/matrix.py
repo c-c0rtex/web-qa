@@ -247,10 +247,11 @@ def compute_coverage(webqa: Path, scenario_rows: list[dict], spec_rows: list[dic
 def coverage_by_role(webqa: Path, scenario_rows: list[dict]) -> dict:
     """Per-role route coverage — "this route was never tested as viewer". Specs are
     excluded: they authenticate with their own hardcoded account, not a matrix role."""
-    role_names = sorted({r["role"] for r in scenario_rows if r.get("role", "-") != "-"})
+    active = [r for r in scenario_rows if r.get("status") != "skip"]  # orphan skip rows
+    role_names = sorted({r["role"] for r in active if r.get("role", "-") != "-"})
     out: dict = {}
     for role in role_names:
-        rows_r = [r for r in scenario_rows if r["role"] == role]
+        rows_r = [r for r in active if r["role"] == role]
         cov = compute_coverage(webqa, rows_r, [])
         out[role] = {"covered": cov["covered"], "total": cov["routes_total"],
                      "uncovered": cov["uncovered"]}
