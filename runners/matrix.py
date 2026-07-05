@@ -305,7 +305,7 @@ def render_junit_xml(alias: str, run_id: str, rows: list[dict]) -> str:
     failures = skipped = 0
     for r in rows:
         bits = [r.get("file") or "", r.get("id") or "", r.get("role") or "", r.get("viewport") or ""]
-        name = quoteattr("::".join(b for b in bits if b))
+        name = quoteattr("::".join(b for b in bits if b and b != "-"))
         status, note = r.get("status", "not-run"), escape(r.get("note") or "")
         if status in ("fail", "error"):
             failures += 1
