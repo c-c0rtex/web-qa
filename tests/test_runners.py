@@ -259,6 +259,18 @@ def test_classify_count():
     assert classify_count(text, 3) == "ambiguous"
 
 
+def test_role_from_spec_matches_role_email_not_default():
+    from locator_probe import role_from_spec
+    proj = {"auth": {"email": "admin@x.io", "password": "p"},
+            "roles": [{"name": "reader", "email": "reader@x.io", "password": "p"}]}
+    # G6 pattern: API setup as default account, UI session as the role — role wins
+    src = "const AUTHOR = { email: 'admin@x.io' };\nconst READER = { email: 'reader@x.io' };"
+    assert role_from_spec(src, proj) == "reader"
+    assert role_from_spec("const U = { email: 'admin@x.io' };", proj) is None  # default session
+    assert role_from_spec("no emails here", proj) is None
+    assert role_from_spec(src, {"auth": {"email": "admin@x.io"}}) is None      # no roles configured
+
+
 def test_probe_feedback_format():
     from locator_probe import probe_feedback
     assert probe_feedback(None) is None

@@ -221,12 +221,15 @@ def seed_prompt_section(seed: str) -> str:
 
 
 def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
-            proj: dict | None = None, live_probe: bool = True) -> tuple[str, str | None, str | None]:
+            proj: dict | None = None, live_probe: bool = True,
+            role: str | None = None) -> tuple[str, str | None, str | None]:
     """Generate + validate one spec. Returns (tc_key, error_or_None, probe_warning_or_None).
 
     Acceptance ladder: parse check (`--list`) is a hard gate with retry; the live locator
     probe earns ONE extra retry with real-DOM feedback, but never blocks acceptance — a
-    probed miss can legitimately be a mid-flow element the entry page doesn't have."""
+    probed miss can legitimately be a mid-flow element the entry page doesn't have.
+    `role` = the TC's declared role: the probe must see the page under the SAME session
+    the spec will use, or role-gated elements produce false verdicts."""
     from locator_probe import probe_feedback, probe_spec
     attempt_prompt = prompt
     last_err: str | None = None
@@ -244,7 +247,7 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
             continue
         fb = None
         if proj is not None and live_probe:
-            fb = probe_feedback(probe_spec(out_path, proj))
+            fb = probe_feedback(probe_spec(out_path, proj, role))
         if fb and not probe_retried:
             probe_retried = True
             attempt_prompt = prompt + PROBE_RETRY_SUFFIX.format(feedback=fb)
@@ -284,7 +287,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     live_probe = live_probe and proj.get("live_probe") is not False
     summary = {"generated": [], "skipped_cached": [], "skipped_passive": [], "errors": [],
                "probe_warnings": []}
-    jobs: list[tuple[str, str, Path, str]] = []  # (tc_key, prompt, out_path, body_hash)
+    jobs: list[tuple[str, str, Path, str, str | None]] = []  # (tc_key, prompt, out_path, body_hash, role)
 
     for md in md_files:
         scenario_stem = md.stem
@@ -327,15 +330,15 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 app_context=app_context,
                 tc_body=f"## {tc_id} — {tc.get('name', '')}\n\n{tc.get('body', '')}",
             )
-            jobs.append((tc_key, prompt, out_path, body_hash))
+            jobs.append((tc_key, prompt, out_path, body_hash, declared[0] if declared else None))
 
     if jobs:
         print(f"[gen] {len(jobs)} spec(s) to generate, {workers} workers", flush=True)
-        hash_by_key = {k: h for k, _, _, h in jobs}
-        path_by_key = {k: o for k, _, o, _ in jobs}
+        hash_by_key = {k: h for k, _, _, h, _ in jobs}
+        path_by_key = {k: o for k, _, o, _, _ in jobs}
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futures = {pool.submit(gen_one, k, p, o, webqa, proj, live_probe): k
-                       for k, p, o, _ in jobs}
+            futures = {pool.submit(gen_one, k, p, o, webqa, proj, live_probe, role): k
+                       for k, p, o, _, role in jobs}
             for fut in as_completed(futures):
                 tc_key = futures[fut]
                 out_path = path_by_key[tc_key]

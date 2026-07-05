@@ -92,9 +92,27 @@ def _resolve(page, loc: dict):
     return None
 
 
-def probe_spec(spec_path: Path, proj: dict) -> dict | None:
+RE_EMAIL_LITERAL = re.compile(r"['\"]([^'\"\s]+@[^'\"\s]+)['\"]")
+
+
+def role_from_spec(source: str, proj: dict) -> str | None:
+    """Infer which ROLE the spec browses as, by matching email literals in its source
+    against the registry's `roles`. RBAC matters here: probing an admin-only element
+    under a reader session yields a false zero. A spec may contain several accounts
+    (API setup as one, UI as another) — a role-account match wins over the default
+    `auth` account, because role creds only appear when the TC declared that role."""
+    emails = set(RE_EMAIL_LITERAL.findall(source))
+    for r in proj.get("roles") or []:
+        if r.get("email") in emails:
+            return r.get("name")
+    return None
+
+
+def probe_spec(spec_path: Path, proj: dict, role: str | None = None) -> dict | None:
     """None = probe not applicable (dynamic entry URL, no locators, no creds, stand
-    unreachable) — never blocks generation, absence of evidence is not a failure."""
+    unreachable) — never blocks generation, absence of evidence is not a failure.
+    `role` selects the login account; without it the spec's own email literals decide
+    (see role_from_spec) so the probe sees the SAME page the spec's session would."""
     source = spec_path.read_text(encoding="utf-8")
     path = entry_path(source)
     locators = extract_locators(source)
@@ -102,7 +120,7 @@ def probe_spec(spec_path: Path, proj: dict) -> dict | None:
         return None
     from explore import api_login, build_storage_state, context_kwargs_for, resolve_credentials, viewport_entry
     try:
-        email, password = resolve_credentials(proj, None, None)
+        email, password = resolve_credentials(proj, None, None, role or role_from_spec(source, proj))
         cookies, _me, token = api_login(proj.get("backend_url") or proj["target_url"],
                                         email, password, proj)
         storage = build_storage_state(cookies, proj["target_url"], token, proj)
