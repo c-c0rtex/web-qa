@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/c-c0rtex/web-qa/ci.yml?style=flat-square&label=CI" alt="CI">
-  <img src="https://img.shields.io/badge/version-0.3.3-blue?style=flat-square" alt="Version 0.3.3">
+  <img src="https://img.shields.io/badge/version-0.3.4-blue?style=flat-square" alt="Version 0.3.4">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/uv-managed-DE5FE9?style=flat-square" alt="uv">

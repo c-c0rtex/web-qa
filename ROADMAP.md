@@ -6,6 +6,24 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.3.4 (dogfooding on RealWorld)
+
+Everything here came out of building [web-qa-demo](https://github.com/c-c0rtex/web-qa-demo)
+against a real RealWorld stack:
+
+- **Config-driven auth adapter** — `auth_login_path` / `auth_login_body` /
+  `auth_token_field` / `auth_browser_storage`: the app's login contract is declared in
+  config.json instead of hardcoded; SPAs that keep the JWT in localStorage get it planted
+  into Playwright storageState
+- **Route mining requires framework evidence** — `app/`/`pages/` only count as file
+  routers when next/nuxt/@sveltejs/kit is in package.json; a plain React `src/pages`
+  layer (FSD) no longer floods the map with junk routes
+- **Crawler honesty** — SPA auth redirects recorded as `redirects to /` instead of
+  duplicated rows; bare `/` and query-only paths (`/?limit=10`) extractable from TCs
+- **Preflight depth** — doctor verifies device-viewport engines (iPhone → webkit
+  installed?); new `workers` config key; register-project scaffolds a clean null-keyed
+  config.json (no more registry fields leaking into project repos)
+
 ## Shipped — v0.3.3 (map completeness & plugin distribution)
 
 - **Language-agnostic TC classification** — the declared `**Type:**` field is the single
