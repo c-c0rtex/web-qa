@@ -6,6 +6,25 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.3.5 (reliability & adoption)
+
+- **Live locator probe** — generated locators are verified against the RUNNING app before
+  a spec is accepted: entry-page misses and strict-mode ambiguities earn one regeneration
+  retry with real-DOM feedback, the rest surface as `probe_warnings` (`live_probe: false`
+  / `--no-probe` to skip)
+- **Seeded fixtures** — `fixture_cmd` / `fixture_teardown_cmd` seed deterministic data
+  before runs (once per matrix); makes visual regression viable on data-driven pages
+- **Network assertions** — a 5xx during a passive TC's navigation fails that TC
+  (per-TC attribution, `network_fail_on`)
+- **Baseline review workflow** — visual regressions save a baseline/current/diff-mask
+  triple, land in a report review queue, and are accepted selectively with
+  `--update-baseline --routes '<glob>'`
+- **CI-native reports** — `matrix --junit <path>` (JUnit XML) + automatic
+  `$GITHUB_STEP_SUMMARY` append inside GitHub Actions
+- **Healing input upgrade** — the fix prompt embeds playwright's `error-context.md`
+  (ARIA snapshot of the failure moment); `--with-screens` hands failure screenshots
+  to the orchestrating agent
+
 ## Shipped — v0.3.4 (dogfooding on RealWorld)
 
 Everything here came out of building [web-qa-demo](https://github.com/c-c0rtex/web-qa-demo)
@@ -107,27 +126,22 @@ against a real RealWorld stack:
   Kimi Code CLI. The deterministic run phase is already agent-agnostic. Ships with a
   compatibility matrix and installs under the shared `.agents/skills/` path
 - [ ] **Healing v2** — flake-aware: tell transient failures (network timeouts, rate limits,
-  races) apart from real regressions — retry the former, heal the latter. Plus ARIA snapshots
-  (`error-context.md`) in the healing prompt instead of raw error text
+  races) apart from real regressions — retry the former, heal the latter. (The other half —
+  `error-context.md` ARIA snapshots in the healing prompt — shipped in v0.3.5)
+- [ ] **Parallel passive stage** — run passive TCs across multiple pages; needs care on
+  small dev stands where parallel browsers turn timing into flaky noise (`workers: 1` exists
+  for a reason)
 
 ## Exploring
 
 Directional. Shape may change; not committed.
 
-- Richer assertions beyond DOM / pixel / a11y — network assertions, console-error gating,
+- Richer assertions beyond DOM / pixel / a11y / network — console-error gating,
   performance budgets
 - API testing from OpenAPI — a deterministic contract layer (schemathesis integration,
   zero tokens) + LLM-generated API flow scenarios (`web-qa-generate --api`), endpoint
   coverage in the matrix
-- Parallel spec execution for larger apps
-- Machine- and human-readable reports — JUnit XML / `$GITHUB_STEP_SUMMARY` for CI,
-  single-file HTML with diff artifacts inline `help wanted`
-- Live selector validation at generation time — verify generated locators against the
-  running app before accepting a spec
-- A review workflow for auto-generated baselines
-- Seeded fixture data — stable dataset for baselines and mutating tests
-- Opt-in screenshot in the healing prompt (`--with-screens`) — healing already spends tokens;
-  the run phase stays vision-free
+- Single-file HTML report with diff artifacts inline `help wanted`
 
 ## Out of scope (for now)
 
