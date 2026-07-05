@@ -28,6 +28,7 @@ from matrix import (
 from maintain import classify_heal_output, failing_specs_from_report, record_app_bug
 from run_scenarios import (
     classify,
+    declared_type,
     extract_paths,
     infer_root_path,
     materialize_path,
@@ -35,7 +36,7 @@ from run_scenarios import (
     tc_roles,
     visual_diff_pct,
 )
-from spec_gen import PROMPT_TEMPLATE, load_seed, postprocess_spec, slugify
+from spec_gen import PROMPT_TEMPLATE, is_mutating, load_seed, postprocess_spec, slugify
 
 
 # ---------- explore ----------
@@ -149,11 +150,58 @@ def test_extract_paths_separates_frontend_and_backend():
     assert backs == [("GET", "/orders/facets")]
 
 
-def test_classify_mutating_by_method_and_prose():
-    kind, reasons = classify("call POST /orders", [("POST", "/orders")])
+def test_classify_declared_type_is_the_source_of_truth():
+    kind, reasons = classify("**Type:** passive\n**Steps:**\n1. open `/orders`", [("GET", "/orders")])
+    assert kind == "passive" and reasons == []
+    kind, reasons = classify("**Type:** mutating\n**Steps:**\n1. look only", [])
     assert kind == "mutating" and reasons
-    kind, _ = classify("just look at the table", [("GET", "/orders")])
+    # declared passive wins even over a mutating HTTP method in the steps
+    kind, _ = classify("**Type:** passive\nverify GET after POST warm-up", [("POST", "/warmup")])
     assert kind == "passive"
+
+
+def test_classify_is_language_agnostic():
+    # no Type field, no HTTP signal → mutating regardless of the prose language;
+    # keyword lists (EN/RU only) used to misclassify third languages as passive
+    for prose in ("Formular absenden und Eintrag löschen",   # de
+                  "フォームを送信してアイテムを削除する",          # ja
+                  "just look at the table"):                  # en, no keywords either
+        kind, reasons = classify(prose, [])
+        assert kind == "mutating"
+        assert any("no **Type:**" in r for r in reasons)
+
+
+def test_classify_http_method_signal_still_reported():
+    kind, reasons = classify("call POST /orders", [("POST", "/orders")])
+    assert kind == "mutating"
+    assert any("POST" in r for r in reasons)
+
+
+def test_declared_type_parsing():
+    assert declared_type("**Type:** passive\nrest") == "passive"
+    assert declared_type("**Type:** `mutating`") == "mutating"
+    assert declared_type("**type:** Passive") == "passive"  # case-insensitive
+    assert declared_type("no field") is None
+
+
+def test_is_mutating_only_declared_passive_is_skipped():
+    assert is_mutating({"body": "**Type:** passive\n**Steps:** open `/`"}) is False
+    assert is_mutating({"body": "**Type:** mutating\n**Steps:** submit"}) is True
+    # undeclared TC → spec-worthy (never guessed from prose keywords)
+    assert is_mutating({"body": "Открыть страницу и сохранить изменения"}) is True
+    assert is_mutating({"body": "nur die Tabelle ansehen"}) is True
+
+
+def test_keyword_terms_quoted_ui_text_and_all_scripts():
+    from run_scenarios import keyword_to_search_terms
+    # quoted UI strings survive verbatim (strongest signal in any language)
+    assert "create item" in keyword_to_search_terms('button `Create item` is visible')
+    assert "заказ создан" in keyword_to_search_terms("появляется «Заказ создан»")
+    # unicode word tokens: latin, cyrillic, and short CJK words all produce terms
+    assert keyword_to_search_terms("shipment counter increases")
+    assert keyword_to_search_terms("таблица заказов отображается")
+    assert keyword_to_search_terms("注文テーブルが表示")  # CJK words are 2-3 chars
+    assert "das" not in keyword_to_search_terms("das Formular wird angezeigt")  # <4 chars skipped
 
 
 def test_infer_root_path_uses_config_hints_only():

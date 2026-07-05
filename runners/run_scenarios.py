@@ -8,8 +8,8 @@ Improvements over v1:
   - Smarter expected-keyword matching: word-boundary tokens (4+ chars), Cyrillic-aware,
     multiple variants per bullet.
   - axe-core injection on every visited frontend page → critical+serious violations recorded.
-  - Better classification: GET-only TCs are passive even if they look "edit"-ish in prose
-    when the only backend op is GET.
+  - Language-agnostic classification: the declared `**Type:**` field is the source of truth;
+    no natural-language keyword matching, so TCs written in any language classify identically.
 
 Output identical to v1 (report.md, results.json, screenshots, console.json) plus a11y.json.
 """
@@ -46,10 +46,8 @@ RE_TC_HEADER = re.compile(r"^##\s+(TC-[A-Za-z0-9-]+)\s*[—-]\s*(.+?)(?:\s+\(.*?
 RE_BACKEND_OP = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+`?(/[a-z][a-zA-Z0-9/_\-{}.]*)`?", re.IGNORECASE)
 RE_PATH_BACKTICKED = re.compile(r"`(/[a-z][a-z0-9/_\-{}.]*)`", re.IGNORECASE)
 RE_PATH_PLAIN = re.compile(r"(?<![A-Za-z0-9/])(/[a-z][a-z0-9/_\-{}.]*)(?![A-Za-z0-9/.])")
-RE_MUTATION_HINT = re.compile(
-    r"\bsubmit\b|сохрани|удали|создат|редакт|правк|изменен|drag|upload|загруз|кликнуть.*кнопк|ввес[тт]и",
-    re.IGNORECASE,
-)
+RE_TC_TYPE = re.compile(r"\*\*Type:\*\*\s*`?(passive|mutating)`?", re.IGNORECASE)
+MUTATING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 # Fallback when the project config has no `backend_prefixes`. Deliberately minimal:
 # per-project API paths belong in <project>/.web-qa/config.json.
@@ -136,16 +134,26 @@ def infer_root_path(tc: dict, route_hints: list[dict]) -> str | None:
     return None
 
 
+def declared_type(body: str) -> str | None:
+    """Explicit `**Type:** passive|mutating` from the TC body. The field values are fixed
+    format vocabulary (like `**Role:**`), independent of the language steps are written in."""
+    m = RE_TC_TYPE.search(body)
+    return m.group(1).lower() if m else None
+
+
 def classify(body: str, backend_ops: list[tuple[str, str]]) -> tuple[str, list[str]]:
-    reasons: list[str] = []
-    for method, _ in backend_ops:
-        if method in ("POST", "PUT", "PATCH", "DELETE"):
-            reasons.append(f"contains {method}")
-    if RE_MUTATION_HINT.search(body):
-        reasons.append("text mentions submit/upload/edit/etc")
-    if reasons:
-        return "mutating", reasons
-    return "passive", []
+    """Language-agnostic: the declared **Type:** wins; otherwise only structural signals
+    (mutating HTTP methods) count — never prose keywords. A TC with no signal at all is
+    treated as mutating: running it passively would report a green check for steps the
+    passive runner never actually executes."""
+    t = declared_type(body)
+    if t == "passive":
+        return "passive", []
+    if t == "mutating":
+        return "mutating", ["declared **Type:** mutating"]
+    reasons = [f"contains {m}" for m, _ in backend_ops if m in MUTATING_METHODS]
+    reasons.append("no **Type:** declared — add `**Type:** passive` to run it in the passive stage")
+    return "mutating", reasons
 
 
 def expected_keywords(body: str) -> list[str]:
@@ -160,17 +168,26 @@ def expected_keywords(body: str) -> list[str]:
     return [it.strip() for it in items[:10]]
 
 
+RE_QUOTED_UI_TEXT = re.compile(r"`([^`]{2,60})`|«([^»]{2,60})»|“([^”]{2,60})”|\"([^\"]{2,60})\"")
+# CJK scripts pack a word into 1-3 chars, so the 4+ threshold below would drop them entirely
+RE_CJK_TOKEN = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]{2,}")
+
+
 def keyword_to_search_terms(kw: str) -> list[str]:
-    """Pull 1-3 representative terms from a bullet. Picks long Cyrillic / Latin words (4+ chars)."""
-    cleaned = re.sub(r"[`*_<>]", " ", kw)
+    """Representative search terms from an Expected bullet, language-agnostic:
+    quoted/backticked strings are taken verbatim first (exact UI text beats word heuristics
+    in any language), then Unicode word tokens (`\\w` covers all scripts)."""
+    terms: list[str] = [next(g for g in m.groups() if g).strip().lower()
+                        for m in RE_QUOTED_UI_TEXT.finditer(kw)]
+    cleaned = re.sub(r"[`*_<>«»“”\"]", " ", kw)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    # words 4+ chars, allow cyrillic & latin & digits
-    words = re.findall(r"[\wа-яА-ЯёЁ]{4,}", cleaned)
-    # Skip generic words
-    stop = {"должен", "должна", "должны", "видны", "видно", "видна", "видно",
-            "expected", "should", "table", "view", "mode", "page", "click", "page"}
-    picked = [w.lower() for w in words if w.lower() not in stop][:4]
-    return picked
+    words = re.findall(r"\w{4,}", cleaned) + RE_CJK_TOKEN.findall(cleaned)
+    # Skip generic words (best-effort noise filter, not a classification signal)
+    stop = {"должен", "должна", "должны", "видны", "видно", "видна",
+            "expected", "should", "table", "view", "mode", "page", "click"}
+    terms += [w.lower() for w in words if w.lower() not in stop]
+    seen: set[str] = set()
+    return [t for t in terms if t and not (t in seen or seen.add(t))][:6]
 
 
 def materialize_path(path: str, ids: dict) -> str:

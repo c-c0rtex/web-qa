@@ -1,6 +1,6 @@
 """Generate Playwright .spec.ts files from .web-qa/scenarios/*.md test cases.
 
-For each TC marked as `Type: mutating` (or any TC if --all), build a prompt with
+For each TC not declared `Type: passive` (or any TC if --all), build a prompt with
 the TC content + project context, call `claude -p` once, save the output as
 .web-qa/specs/<scenario-stem>__<tc-id>.spec.ts. Caches by sha256 of TC body to
 skip unchanged TCs on rerun.
@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, resolve_credentials
-from run_scenarios import split_tcs, tc_roles
+from run_scenarios import declared_type, split_tcs, tc_roles
 
 
 MAX_CONTEXT_CHARS = 24000
@@ -117,10 +117,10 @@ def tc_hash(body: str) -> str:
 
 
 def is_mutating(tc: dict) -> bool:
-    body = tc.get("body", "").lower()
-    if "type:** mutating" in body or "type: mutating" in body:
-        return True
-    return bool(re.search(r"\bsubmit\b|сохрани|удали|создат|редакт|правк|изменен|drag|upload|загруз", body, re.IGNORECASE))
+    """A TC is spec-worthy unless it explicitly declares `**Type:** passive`.
+    Language-agnostic: only the structured field counts, never prose keywords —
+    an undeclared TC gets a real spec rather than being silently skipped."""
+    return declared_type(tc.get("body", "")) != "passive"
 
 
 def call_claude(prompt: str, timeout: int | None = None) -> str:

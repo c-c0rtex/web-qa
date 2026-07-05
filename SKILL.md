@@ -190,6 +190,7 @@ pixel diff. **Visual judgment is YOUR job as the orchestrating agent:**
 - **a11y severity:** WCAG critical/serious = bug, the rest = note.
 - **Golden path first.** Scenarios start with the happy path, then edge cases.
 - **Mutating tests create their own data** (`test_data_prefix`), act on it, delete it in `try/finally`. Never mutate pre-existing data.
+- **`**Type:** passive|mutating` is required on every TC and is the only classification signal** (plus HTTP methods in explicit backend ops). Runners never guess intent from prose keywords — TCs work identically in any language. A TC without `**Type:**` is treated as mutating: it gets a real spec instead of a green passive check for steps that never executed.
 
 ## Troubleshooting
 

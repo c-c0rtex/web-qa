@@ -79,7 +79,8 @@ OUTPUT FORMAT (STRICT — this file is parsed by regex, follow it exactly):
 ...
 
 RULES:
-- `Type: passive` = read-only checks; `Type: mutating` = creates/edits/deletes data
+- `**Type:**` is REQUIRED on every TC: `passive` = read-only checks, `mutating` = creates/edits/deletes
+  data. A TC without it is treated as mutating (runners never guess intent from prose)
 - Frontend paths in backticks: `/orders`. Backend calls as: GET `/orders/facets`
 - Expected bullets must be OBSERVABLE on the page (visible text, table columns, counters)
 - If behaviour differs per role, write SEPARATE TCs annotated `**Role:** <name>` — never mix
