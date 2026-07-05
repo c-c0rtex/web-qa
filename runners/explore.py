@@ -159,11 +159,48 @@ def merge_manual_section(new_md: str, existing_md: str | None) -> str:
     return new_md.rstrip() + "\n\n" + manual + "\n"
 
 
-def api_login(backend_url: str, email: str, password: str) -> tuple[dict, dict]:
-    """Return (cookies_dict, user_me_dict)."""
-    r = httpx.post(f"{backend_url}/auth/login", json={"email": email, "password": password}, timeout=10)
+def _render_body(tpl, subs: dict):
+    """Recursively substitute {email}/{password} placeholders in a JSON body template."""
+    if isinstance(tpl, str):
+        for k, v in subs.items():
+            tpl = tpl.replace("{" + k + "}", v)
+        return tpl
+    if isinstance(tpl, dict):
+        return {k: _render_body(v, subs) for k, v in tpl.items()}
+    if isinstance(tpl, list):
+        return [_render_body(v, subs) for v in tpl]
+    return tpl
+
+
+def _dig(obj, dotted: str):
+    """`user.token` → obj["user"]["token"], None on any miss."""
+    for part in dotted.split("."):
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(part)
+    return obj
+
+
+def api_login(backend_url: str, email: str, password: str,
+              proj: dict | None = None) -> tuple[dict, dict, str | None]:
+    """Return (cookies_dict, user_me_dict, token_or_None).
+
+    Config-driven auth adapter — the login contract differs per app and is declared in
+    config.json instead of being hardcoded:
+      auth_login_path   login endpoint (default /auth/login)
+      auth_login_body   JSON body template with {email}/{password} (default flat)
+      auth_token_field  dot-path to a bearer token in the response (e.g. "user.token")
+    Cookie-session apps need none of these — the defaults reproduce the old behavior."""
+    proj = proj or {}
+    path = proj.get("auth_login_path") or "/auth/login"
+    body_tpl = proj.get("auth_login_body") or {"email": "{email}", "password": "{password}"}
+    body = _render_body(body_tpl, {"email": email, "password": password})
+    r = httpx.post(f"{backend_url}{path}", json=body, timeout=10)
     r.raise_for_status()
-    return dict(r.cookies), r.json()
+    data = r.json()
+    token_field = proj.get("auth_token_field")
+    token = str(_dig(data, token_field)) if token_field and _dig(data, token_field) else None
+    return dict(r.cookies), data, token
 
 
 def fetch_openapi(backend_url: str) -> dict:
@@ -192,6 +229,23 @@ def cookies_to_storage_state(cookies: dict, target_url: str) -> dict:
         ],
         "origins": [],
     }
+
+
+def build_storage_state(cookies: dict, target_url: str, token: str | None = None,
+                        proj: dict | None = None) -> dict:
+    """Playwright storageState: cookies always; plus a localStorage entry when the app
+    keeps its auth token there (config `auth_browser_storage`:
+    {"kind": "localStorage", "key": "<ls key>", "value": "{token}"}). SPAs like RealWorld
+    never see a session cookie — without this the crawler browses logged-out."""
+    state = cookies_to_storage_state(cookies, target_url)
+    bs = (proj or {}).get("auth_browser_storage") or {}
+    if token and bs.get("kind") == "localStorage" and bs.get("key"):
+        parsed = urlparse(target_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        value = (bs.get("value") or "{token}").replace("{token}", token)
+        state["origins"] = [{"origin": origin,
+                             "localStorage": [{"name": bs["key"], "value": value}]}]
+    return state
 
 
 def extract_page_summary(page) -> dict:
@@ -246,7 +300,7 @@ def normalize_for_dedup(url: str) -> str:
     """Dedup key: strip query/fragment, collapse numeric path segments to {id}.
     /orders?page=2 and /orders are one page; /orders/17 and /orders/42 are one template."""
     parsed = urlparse(url.split("#")[0])
-    path = re.sub(r"/\d+(?=/|$)", "/{id}", parsed.path)
+    path = re.sub(r"/\d+(?=/|$)", "/{id}", parsed.path) or "/"
     return f"{parsed.scheme}://{parsed.netloc}{path}"
 
 
@@ -360,6 +414,15 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
             except Exception as e:
                 pages.append({"url": url, "error": str(e)})
                 continue
+            # SPA redirected us elsewhere (e.g. /login → / for an authenticated session):
+            # record the redirect instead of duplicating the landing page's row
+            landed_key = normalize_for_dedup(page.url)
+            if landed_key != key:
+                if landed_key in visited:
+                    pages.append({"path": urlparse(url).path or "/",
+                                  "redirected_to": urlparse(page.url).path or "/"})
+                    continue
+                visited.add(landed_key)
             try:
                 summary = extract_page_summary(page)
             except Exception as e:
@@ -423,6 +486,10 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
     for p in pages:
         if "error" in p and "url" in p:
             lines.append(f"| {urlparse(p['url']).path} | _error_ | {p['error'][:60]} | — | — | — | crawl |")
+            continue
+        if p.get("redirected_to"):
+            lines.append(f"| `{p['path']}` | — | _redirects to `{p['redirected_to']}`_ "
+                         f"| — | — | — | {p.get('origin', 'crawl')} |")
             continue
         if p.get("uncrawled"):
             lines.append(f"| `{p['path']}` | — | _declared in code, not reached by crawl_ "
@@ -569,10 +636,10 @@ def main() -> int:
     email, password = resolve_credentials(proj, args.email, args.password)
 
     print(f"[explore] login → {backend}", file=sys.stderr)
-    cookies, user_me = api_login(backend, email, password)
+    cookies, user_me, token = api_login(backend, email, password, proj)
     print(f"[explore] logged in as {user_me.get('email')} ({user_me.get('role')})", file=sys.stderr)
 
-    storage = cookies_to_storage_state(cookies, target)
+    storage = build_storage_state(cookies, target, token, proj)
     openapi = fetch_openapi(backend)
 
     entry = viewport_entry(proj, args.viewport)

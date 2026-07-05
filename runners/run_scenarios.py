@@ -28,8 +28,8 @@ from playwright.sync_api import sync_playwright, ConsoleMessage, Response
 
 from explore import (
     api_login,
+    build_storage_state,
     context_kwargs_for,
-    cookies_to_storage_state,
     load_project,
     resolve_credentials,
     viewport_entry,
@@ -466,8 +466,8 @@ def main() -> int:
     baseline_dir = project_path / ".web-qa" / "baseline"
 
     email, password = resolve_credentials(proj, args.email, args.password, args.role)
-    cookies, user_me = api_login(backend, email, password)
-    storage = cookies_to_storage_state(cookies, target)
+    cookies, user_me, token = api_login(backend, email, password, proj)
+    storage = build_storage_state(cookies, target, token, proj)
     ids = discover_ids(backend, cookies, id_discovery)
     print(f"[run] discovered ids: {ids}", file=sys.stderr)
 

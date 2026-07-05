@@ -27,6 +27,11 @@
     { "endpoint": "/orders", "key": "order" }
   ],
 
+  "auth_login_path": null,
+  "auth_login_body": null,
+  "auth_token_field": null,
+  "auth_browser_storage": null,
+
   "auth_login_hint": "POST {backend}/auth/login returns JWT `access_token` in the JSON body (NOT a cookie). Do the login via `page.request.post` so the refresh-cookie lands in the browser context — after that `page.goto()` is authorized automatically. For Node-side API setup/teardown calls create a separate request context with `extraHTTPHeaders: { Authorization: `Bearer ${access_token}` }`.",
 
   "auth_flow_notes": [

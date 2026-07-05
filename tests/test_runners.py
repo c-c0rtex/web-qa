@@ -139,6 +139,36 @@ def test_context_kwargs_device_vs_size():
         context_kwargs_for({"device": "Nokia 3310"}, _FakePlaywright())
 
 
+# ---------- auth adapter ----------
+
+
+def test_render_body_substitutes_nested_placeholders():
+    from explore import _render_body
+    tpl = {"user": {"email": "{email}", "password": "{password}"}, "keep": 1}
+    out = _render_body(tpl, {"email": "a@b.c", "password": "s3"})
+    assert out == {"user": {"email": "a@b.c", "password": "s3"}, "keep": 1}
+    assert tpl["user"]["email"] == "{email}"  # template untouched
+
+
+def test_dig_dot_path():
+    from explore import _dig
+    assert _dig({"user": {"token": "jwt"}}, "user.token") == "jwt"
+    assert _dig({"user": {}}, "user.token") is None
+    assert _dig({"user": "flat"}, "user.token") is None
+
+
+def test_build_storage_state_localstorage_token():
+    from explore import build_storage_state
+    proj = {"auth_browser_storage": {"kind": "localStorage", "key": "realworld-auth-token"}}
+    st = build_storage_state({"sid": "x"}, "http://127.0.0.1:30401", "jwt-123", proj)
+    assert st["cookies"][0]["name"] == "sid"                       # cookies still there
+    assert st["origins"] == [{"origin": "http://127.0.0.1:30401",
+                              "localStorage": [{"name": "realworld-auth-token", "value": "jwt-123"}]}]
+    # no token or no config → old behavior, empty origins
+    assert build_storage_state({}, "http://x", None, proj)["origins"] == []
+    assert build_storage_state({}, "http://x", "jwt", {})["origins"] == []
+
+
 # ---------- registry ----------
 
 
@@ -190,8 +220,14 @@ def _touch(root, *rel):
     return p
 
 
+def _pkg(root, *deps):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "package.json").write_text(json.dumps({"dependencies": {d: "*" for d in deps}}))
+
+
 def test_mine_next_app_router(tmp_path):
     from route_mine import mine_routes
+    _pkg(tmp_path, "next")
     _touch(tmp_path, "app", "page.tsx")
     _touch(tmp_path, "app", "orders", "[orderId]", "page.tsx")
     _touch(tmp_path, "app", "(dashboard)", "settings", "page.tsx")   # group stripped
@@ -204,6 +240,7 @@ def test_mine_next_app_router(tmp_path):
 
 def test_mine_pages_router_and_nuxt(tmp_path):
     from route_mine import mine_routes
+    _pkg(tmp_path, "next", "nuxt")
     _touch(tmp_path, "pages", "index.tsx")
     _touch(tmp_path, "pages", "orders", "[id].tsx")
     _touch(tmp_path, "pages", "_app.tsx")
@@ -224,6 +261,18 @@ def test_mine_router_config_absolute_only(tmp_path):
         "]; export const x = <Route path=\"/reports\" element={<R/>} />;")
     paths = [m["path"] for m in mine_routes(tmp_path)]
     assert paths == ["/admin", "/reports", "/users/{userId}"]
+
+
+def test_mine_requires_framework_dependency(tmp_path):
+    """src/pages in a plain React app (FSD layout) is NOT a file router — without
+    next/nuxt in package.json only real route declarations (router-config) are mined."""
+    from route_mine import mine_routes
+    _pkg(tmp_path, "react", "react-router")
+    _touch(tmp_path, "src", "pages", "article", "article.route.ts").write_text(
+        "export const articleRoute = { path: '/article/:slug' };")
+    _touch(tmp_path, "src", "pages", "article", "article.loader.ts")
+    _touch(tmp_path, "src", "pages", "home", "home.ui.tsx")
+    assert [m["path"] for m in mine_routes(tmp_path)] == ["/article/{slug}"]
 
 
 def test_as_template_unifies_params_and_ids():

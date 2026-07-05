@@ -146,18 +146,18 @@ def check_project(results: list[dict], alias: str) -> None:
     try:
         email, password = resolve_credentials(proj, None, None)
         try:
-            _, me = api_login(backend or target, email, password)
+            _, me, _tok = api_login(backend or target, email, password, proj)
             check(results, "login", OK, f"{me.get('email', email)} ({me.get('role', '?')})")
         except Exception as e:
             check(results, "login", FAIL, f"{type(e).__name__}: {str(e)[:100]}",
-                  "check auth in projects.json and the /auth/login endpoint")
+                  "check auth in projects.json and the login endpoint (auth_login_path)")
     except SystemExit as e:
         check(results, "credentials", FAIL, str(e)[:120], "set auth in projects.json")
 
     for r in proj.get("roles") or []:
         name = r.get("name", "?")
         try:
-            api_login(backend or target, r.get("email", ""), r.get("password", ""))
+            api_login(backend or target, r.get("email", ""), r.get("password", ""), proj)
             check(results, f"role: {name}", OK, r.get("email", ""))
         except Exception as e:
             check(results, f"role: {name}", FAIL, f"{type(e).__name__}: {str(e)[:80]}",

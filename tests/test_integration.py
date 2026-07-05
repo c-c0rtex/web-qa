@@ -222,6 +222,7 @@ def test_explore_mines_code_routes_and_seeds_crawl(env, tmp_path):
     denominator."""
     root = tmp_path / "proj"
     (root / ".web-qa").mkdir(parents=True)
+    (root / "package.json").write_text('{"dependencies": {"next": "*"}}')
     for rel in ("app/ghost/page.tsx", "app/orders/[orderId]/page.tsx"):
         f = root / rel
         f.parent.mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,7 @@ points at them) and expand the coverage denominator in app.context.md.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -145,12 +146,30 @@ def _normalize(path: str) -> str:
     return path.rstrip("/") or "/"
 
 
+def _package_deps(root: Path) -> set[str]:
+    """dependencies+devDependencies names from root/package.json (empty set if none)."""
+    try:
+        pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    deps: set[str] = set()
+    for key in ("dependencies", "devDependencies"):
+        deps |= set(pkg.get(key) or {})
+    return deps
+
+
 def mine_routes(project_root: Path, frontend_dir: str | None = None) -> list[dict]:
     """Returns [{"path": "/orders/{id}", "source": "next-app"}, ...], deduped and sorted.
-    `frontend_dir` (config.json) points at the app inside a monorepo; default: repo root."""
+    `frontend_dir` (config.json) points at the app inside a monorepo; default: repo root.
+
+    File-router mining requires the framework in package.json: an `app/` or `pages/`
+    directory only IS a router under Next/Nuxt/SvelteKit — a `src/pages` layer in a plain
+    React app (FSD and friends) is just code layout, and guessing by directory name would
+    flood the map with junk routes. Structural evidence over naming, as everywhere else."""
     root = project_root / frontend_dir if frontend_dir else project_root
     if not root.is_dir():
         return []
+    deps = _package_deps(root)
     found: dict[str, str] = {}
 
     def add(paths: list[str], source: str) -> None:
@@ -160,13 +179,13 @@ def mine_routes(project_root: Path, frontend_dir: str | None = None) -> list[dic
 
     for base in (root, root / "src"):
         app_dir = base / "app"
-        if app_dir.is_dir():
+        if app_dir.is_dir() and "next" in deps:
             add(_mine_next_app(app_dir), "next-app")
         pages_dir = base / "pages"
-        if pages_dir.is_dir():
+        if pages_dir.is_dir() and ("next" in deps or "nuxt" in deps):
             add(_mine_pages_dir(pages_dir), "pages-dir")
     sveltekit = root / "src" / "routes"
-    if sveltekit.is_dir() and any(sveltekit.rglob("+page.svelte")):
+    if sveltekit.is_dir() and "@sveltejs/kit" in deps:
         add(_mine_sveltekit(sveltekit), "sveltekit")
 
     scan_root = root / "src" if (root / "src").is_dir() else root
