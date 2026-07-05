@@ -150,14 +150,22 @@ def test_extract_paths_separates_frontend_and_backend():
     assert backs == [("GET", "/orders/facets")]
 
 
-def test_classify_declared_type_is_the_source_of_truth():
-    kind, reasons = classify("**Type:** passive\n**Steps:**\n1. open `/orders`", [("GET", "/orders")])
+def test_classify_declared_type_beats_absence():
+    kind, reasons = classify("**Type:** passive\n**Steps:**\n1. open `/orders`\n2. GET `/orders`")
     assert kind == "passive" and reasons == []
-    kind, reasons = classify("**Type:** mutating\n**Steps:**\n1. look only", [])
+    kind, reasons = classify("**Type:** mutating\n**Steps:**\n1. look only")
     assert kind == "mutating" and reasons
-    # declared passive wins even over a mutating HTTP method in the steps
-    kind, _ = classify("**Type:** passive\nverify GET after POST warm-up", [("POST", "/warmup")])
-    assert kind == "passive"
+
+
+def test_classify_steps_evidence_beats_declaration():
+    # an LLM-mislabeled "passive" must not survive a mutating action in Steps
+    kind, reasons = classify("**Type:** passive\n**Steps:**\n1. POST `/orders`\n**Expected:**\n- 403")
+    assert kind == "mutating"
+    assert any("contradicted by POST /orders" in r for r in reasons)
+    # ...but a method in Expected is context, not an action — no conflict
+    kind, reasons = classify(
+        "**Type:** passive\n**Steps:**\n1. open `/dash`\n**Expected:**\n- data comes from POST `/sync`")
+    assert kind == "passive" and reasons == []
 
 
 def test_classify_is_language_agnostic():
@@ -166,13 +174,13 @@ def test_classify_is_language_agnostic():
     for prose in ("Formular absenden und Eintrag löschen",   # de
                   "フォームを送信してアイテムを削除する",          # ja
                   "just look at the table"):                  # en, no keywords either
-        kind, reasons = classify(prose, [])
+        kind, reasons = classify(prose)
         assert kind == "mutating"
         assert any("no **Type:**" in r for r in reasons)
 
 
 def test_classify_http_method_signal_still_reported():
-    kind, reasons = classify("call POST /orders", [("POST", "/orders")])
+    kind, reasons = classify("**Steps:**\n1. call POST `/orders`")
     assert kind == "mutating"
     assert any("POST" in r for r in reasons)
 

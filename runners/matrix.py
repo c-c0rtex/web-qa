@@ -50,8 +50,8 @@ def collect_scenario_tcs(webqa: Path, backend_prefixes: tuple[str, ...]) -> list
     scenarios_dir = webqa / "scenarios"
     for md in sorted(scenarios_dir.glob("*.md")) if scenarios_dir.is_dir() else []:
         for tc in split_tcs(md.read_text(encoding="utf-8")):
-            fronts, backs = extract_paths(tc["body"], backend_prefixes)
-            kind, _ = classify(tc["body"], backs)
+            fronts, _ = extract_paths(tc["body"], backend_prefixes)
+            kind, _ = classify(tc["body"])
             rows.append({
                 "source": "scenario", "file": md.name, "id": tc["id"],
                 "title": tc["title"], "kind": kind, "status": "not-run",

@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from explore import load_project
+from run_scenarios import classify, declared_type, split_tcs
 from spec_gen import call_claude, load_app_context, slugify
 
 MAX_DIFF_CHARS = 9000
@@ -161,8 +162,21 @@ def main() -> int:
         return 1
 
     out_path.write_text(md if md.endswith("\n") else md + "\n", encoding="utf-8")
-    print(json.dumps({"out": str(out_path), "tc_count": len(tc_ids), "tc_ids": tc_ids},
-                     ensure_ascii=False))
+
+    # Catch a mislabeled Type at birth, while the human is still reviewing the md plan:
+    # declared passive + a mutating HTTP op in Steps = contradiction (classify will
+    # override it to mutating at run time, but the author should fix the TC now)
+    conflicts = []
+    for tc in split_tcs(md):
+        kind, reasons = classify(tc["body"])
+        if declared_type(tc["body"]) == "passive" and kind == "mutating":
+            conflicts.append({"id": tc["id"], "reasons": reasons})
+            print(f"[generate] WARNING {tc['id']}: {'; '.join(reasons)}", file=sys.stderr)
+
+    summary = {"out": str(out_path), "tc_count": len(tc_ids), "tc_ids": tc_ids}
+    if conflicts:
+        summary["type_conflicts"] = conflicts
+    print(json.dumps(summary, ensure_ascii=False))
     return 0
 
 

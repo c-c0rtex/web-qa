@@ -141,17 +141,35 @@ def declared_type(body: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
-def classify(body: str, backend_ops: list[tuple[str, str]]) -> tuple[str, list[str]]:
-    """Language-agnostic: the declared **Type:** wins; otherwise only structural signals
-    (mutating HTTP methods) count — never prose keywords. A TC with no signal at all is
-    treated as mutating: running it passively would report a green check for steps the
-    passive runner never actually executes."""
+RE_STEPS_BLOCK = re.compile(r"\*\*Steps:?\*\*\s*(.+?)(?=\n\*\*|\n##|$)", re.DOTALL | re.IGNORECASE)
+
+
+def steps_mutating_ops(body: str) -> list[tuple[str, str]]:
+    """Mutating HTTP ops from the **Steps:** block only. Steps are the test's ACTIONS —
+    a method mentioned in **Expected:** («data comes from POST /sync») is context, not
+    something the test does, so it is never evidence of mutation."""
+    m = RE_STEPS_BLOCK.search(body)
+    scope = m.group(1) if m else body  # freeform TC without a Steps block: best effort
+    return [(op.group(1).upper(), op.group(2))
+            for op in RE_BACKEND_OP.finditer(scope)
+            if op.group(1).upper() in MUTATING_METHODS]
+
+
+def classify(body: str) -> tuple[str, list[str]]:
+    """Language-agnostic: structural evidence beats the declaration, the declaration beats
+    absence — never prose keywords. A declared `passive` is overridden when Steps contain a
+    mutating HTTP op (an LLM mislabel must not earn a green passive check for actions the
+    passive runner never executes); a TC with no signals at all is treated as mutating for
+    the same reason."""
     t = declared_type(body)
+    ops = steps_mutating_ops(body)
     if t == "passive":
+        if ops:
+            return "mutating", [f"declared passive contradicted by {m} {p} in Steps" for m, p in ops]
         return "passive", []
     if t == "mutating":
         return "mutating", ["declared **Type:** mutating"]
-    reasons = [f"contains {m}" for m, _ in backend_ops if m in MUTATING_METHODS]
+    reasons = [f"contains {m} {p}" for m, p in ops]
     reasons.append("no **Type:** declared — add `**Type:** passive` to run it in the passive stage")
     return "mutating", reasons
 
@@ -497,8 +515,7 @@ def main() -> int:
                         "artifacts": [], "scenario_file": sf.name, "a11y_critical": [],
                     })
                     continue
-                fronts_pre, backs_pre = extract_paths(tc["body"], backend_prefixes)
-                kind, reasons = classify(tc["body"], backs_pre)
+                kind, reasons = classify(tc["body"])
                 if kind == "mutating" and not args.include_mutating:
                     all_results.append({
                         "id": tc["id"], "title": tc["title"], "kind": "mutating",
