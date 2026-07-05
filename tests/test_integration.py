@@ -286,6 +286,34 @@ test('t', async ({ page }) => {
     assert res["ambiguous"] == []
 
 
+def test_fixture_cmd_and_network_assertion(env):
+    """fixture_cmd runs before the passive stage (seeded marker exists), and a 5xx fired
+    by a page turns its TC into a fail with a NETWORK note."""
+    cfg = env["webqa"] / "config.json"
+    cfg.write_text(json.dumps({"fixture_cmd": "touch .web-qa/seeded.marker",
+                               "fixture_teardown_cmd": "touch .web-qa/torn.marker"}))
+    (env["webqa"] / "scenarios" / "net.md").write_text(
+        "# net\n\n## TC-N1 — page with failing api call\n**Type:** passive\n**Steps:**\n"
+        "1. Open `/oops`\n**Expected:**\n- Oops page heading visible\n")
+    try:
+        rc, out, err = run_runner("run_scenarios.py",
+                                  ["--alias", "fx", "--scenarios", "net.md"], env["env"])
+        assert (env["webqa"] / "seeded.marker").exists()          # fixtures ran first
+        assert (env["webqa"] / "torn.marker").exists()            # teardown ran last
+        results = json.loads(sorted((env["webqa"] / "reports").glob("*/results.json"))[-1].read_text())
+        tc = results["results"][0]
+        assert tc["status"] == "fail", tc["notes"]
+        assert any("NETWORK: 500" in n for n in tc["notes"]), tc["notes"]
+        # a failing fixture_cmd is a hard stop
+        cfg.write_text(json.dumps({"fixture_cmd": "exit 7"}))
+        rc, out, err = run_runner("run_scenarios.py",
+                                  ["--alias", "fx", "--scenarios", "net.md"], env["env"])
+        assert rc != 0 and "fixture_cmd failed" in err
+    finally:
+        cfg.unlink()
+        (env["webqa"] / "scenarios" / "net.md").unlink()
+
+
 def test_maintain_appbug_fixmes_and_records_bug(env):
     spec = env["webqa"] / "specs" / "t2.spec.ts"
     spec.write_text("original-content")

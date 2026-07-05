@@ -42,7 +42,7 @@ CURRENT SPEC ({spec_name}):
 
 ACTUAL FAILURE OUTPUT from `playwright test` (contains the real page state / selector mismatches):
 {errors}
-
+{failure_context_section}
 TASK — FIRST classify the failure, THEN act:
 (a) TEST FRAGILITY (selector drift, timing, wrong assumption about the page) → output the
     corrected spec
@@ -116,6 +116,34 @@ def failing_specs_from_report(report: dict) -> dict[str, list[str]]:
     return fails
 
 
+def failure_artifacts(webqa: Path, spec_name: str) -> dict:
+    """error-context.md content + failure screenshot paths for a spec, harvested from
+    playwright's test-results/. The error-context file carries an ARIA snapshot of the
+    page AT THE MOMENT of failure — far stronger healing input than the error text alone.
+    Playwright truncates result-dir names, so match on a raw name prefix."""
+    out: dict = {"error_context": None, "screens": []}
+    tr = webqa / "test-results"
+    if not tr.is_dir():
+        return out
+    prefix = Path(spec_name).stem[:24].lower()
+    for d in sorted(tr.iterdir()):
+        if not d.is_dir() or not d.name.lower().startswith(prefix):
+            continue
+        ec = d / "error-context.md"
+        if ec.is_file() and out["error_context"] is None:
+            out["error_context"] = ec.read_text(encoding="utf-8", errors="ignore")[:4000]
+        out["screens"] += [str(p) for p in sorted(d.glob("*.png"))]
+    return out
+
+
+def failure_context_section(error_context: str | None) -> str:
+    if not error_context:
+        return ""
+    return ("\nPAGE STATE AT FAILURE (playwright error-context — what the page actually "
+            "looked like when it failed; trust this over assumptions):\n"
+            f"{error_context}\n")
+
+
 RE_TRANSIENT = re.compile(r"^\s*//\s*TRANSIENT:\s*(.+)$", re.MULTILINE)
 RE_APP_BUG = re.compile(r"^\s*//\s*APP-BUG:\s*(.+)$", re.MULTILINE)
 
@@ -150,12 +178,14 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
              proj: dict | None = None) -> tuple[str, str | None, str | None, str, str, str | None]:
     """Returns (spec_name, out_file_or_None, error_or_None, kind, detail, probe_warning).
     kind: 'fix' | 'transient' | 'app-bug'."""
+    artifacts = failure_artifacts(webqa, spec_path.name)
     prompt = FIX_PROMPT.format(
         app_context=app_context,
         seed_section=seed_section,
         spec_name=spec_path.name,
         spec_code=spec_path.read_text(encoding="utf-8")[:12000],
         errors="\n\n---\n\n".join(errors[:4]),
+        failure_context_section=failure_context_section(artifacts["error_context"]),
     )
     try:
         code = postprocess_spec(call_claude(prompt))
@@ -201,6 +231,9 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="overwrite specs in place (keeps .bak)")
     ap.add_argument("--workers", type=int, default=3, help="parallel claude calls")
     ap.add_argument("--pw-workers", type=int, help="playwright --workers for the test run")
+    ap.add_argument("--with-screens", action="store_true",
+                    help="list failure screenshot paths in the summary JSON so the "
+                         "orchestrating agent can Read them (visual judgment is its job)")
     args = ap.parse_args()
 
     proj = load_project(args.alias)
@@ -257,6 +290,10 @@ def main() -> int:
             else:
                 summary["healed"].append({"spec": name, "out": out_file})
                 print(f"[maintain] OK   {name} → {out_file}", file=sys.stderr)
+
+    if args.with_screens:
+        summary["screens"] = {fname: failure_artifacts(webqa, fname)["screens"]
+                              for fname in fails}
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if not summary["errors"] else 1

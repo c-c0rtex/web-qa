@@ -139,6 +139,75 @@ def test_context_kwargs_device_vs_size():
         context_kwargs_for({"device": "Nokia 3310"}, _FakePlaywright())
 
 
+# ---------- fixtures / junit / diff mask / failure artifacts ----------
+
+
+def test_run_fixture_cmd(tmp_path, capsys):
+    from explore import run_fixture_cmd
+    run_fixture_cmd({})                                            # no cmd → no-op
+    run_fixture_cmd({"fixture_cmd": "touch seeded.marker", "path": str(tmp_path)})
+    assert (tmp_path / "seeded.marker").exists()
+    with pytest.raises(SystemExit, match="fixture_cmd failed"):
+        run_fixture_cmd({"fixture_cmd": "exit 3", "path": str(tmp_path)})
+    run_fixture_cmd({"fixture_teardown_cmd": "touch torn.marker", "path": str(tmp_path)},
+                    teardown=True)
+    assert (tmp_path / "torn.marker").exists()
+
+
+def test_render_junit_xml_roundtrip():
+    import xml.etree.ElementTree as ET
+
+    from matrix import render_junit_xml
+    rows = [
+        {"file": "a.md", "id": "TC-1", "role": "reader", "viewport": "mobile", "status": "pass"},
+        {"file": "b.spec.ts", "status": "fail", "note": 'boom & <tag> "quoted"'},
+        {"file": "c.md", "id": "TC-2", "status": "manual", "note": "skipped (mutating)"},
+    ]
+    root = ET.fromstring(render_junit_xml("demo", "run-1", rows))
+    suite = root.find("testsuite")
+    assert suite.get("tests") == "3" and suite.get("failures") == "1" and suite.get("skipped") == "1"
+    names = [c.get("name") for c in suite.findall("testcase")]
+    assert "a.md::TC-1::reader::mobile" in names
+    failure = suite.findall("testcase")[1].find("failure")
+    assert "boom &" in failure.text
+
+
+def test_save_diff_mask_renders_changed_pixels(tmp_path):
+    from PIL import Image
+
+    from run_scenarios import save_diff_mask
+    a = Image.new("RGB", (10, 10), (255, 255, 255))
+    b = Image.new("RGB", (10, 10), (255, 255, 255))
+    for x in range(5):
+        b.putpixel((x, 0), (0, 0, 0))
+    a.save(tmp_path / "a.png")
+    b.save(tmp_path / "b.png")
+    assert save_diff_mask(tmp_path / "a.png", tmp_path / "b.png", tmp_path / "d.png")
+    mask = Image.open(tmp_path / "d.png").convert("RGB")
+    assert mask.getpixel((0, 0)) == (220, 30, 30)                   # changed → red
+    assert mask.getpixel((9, 9)) == (255, 255, 255)                 # unchanged → white
+    # size mismatch → no mask (that's a layout regression, not a pixel diff)
+    Image.new("RGB", (5, 5)).save(tmp_path / "c.png")
+    assert not save_diff_mask(tmp_path / "a.png", tmp_path / "c.png", tmp_path / "e.png")
+
+
+def test_failure_artifacts_prefix_match(tmp_path):
+    from maintain import failure_artifacts, failure_context_section
+    tr = tmp_path / "test-results"
+    d = tr / "article-lifecycle__tc-g2-c-0da09--editor-chromium"
+    d.mkdir(parents=True)
+    (d / "error-context.md").write_text("# Page snapshot\n- button \"Publish\"")
+    (d / "test-failed-1.png").write_text("png")
+    (tr / "other-spec-tc-x-chromium").mkdir()
+    out = failure_artifacts(tmp_path, "article-lifecycle__tc-g2-create-a-new-article.spec.ts")
+    assert "Publish" in out["error_context"]
+    assert len(out["screens"]) == 1
+    assert failure_context_section(None) == ""
+    assert "PAGE STATE AT FAILURE" in failure_context_section(out["error_context"])
+    # no test-results dir at all → empty, no crash
+    assert failure_artifacts(tmp_path / "nope", "x.spec.ts") == {"error_context": None, "screens": []}
+
+
 # ---------- locator probe ----------
 
 

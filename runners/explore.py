@@ -181,6 +181,22 @@ def _dig(obj, dotted: str):
     return obj
 
 
+def run_fixture_cmd(proj: dict, *, teardown: bool = False) -> None:
+    """Run the project's `fixture_cmd` / `fixture_teardown_cmd` (config.json) from the
+    project root. Deterministic seeded data is what makes visual regression possible on
+    data-driven pages and keeps specs independent of leftover state. A non-zero exit is
+    a hard stop: verdicts from a half-seeded stand can't be trusted."""
+    import subprocess
+    key = "fixture_teardown_cmd" if teardown else "fixture_cmd"
+    cmd = proj.get(key)
+    if not cmd:
+        return
+    print(f"[fixtures] {key}: {cmd}", file=sys.stderr)
+    proc = subprocess.run(cmd, shell=True, cwd=proj.get("path") or ".", timeout=600)
+    if proc.returncode != 0:
+        raise SystemExit(f"{key} failed (exit {proc.returncode}): {cmd}")
+
+
 def api_login(backend_url: str, email: str, password: str,
               proj: dict | None = None) -> tuple[dict, dict, str | None]:
     """Return (cookies_dict, user_me_dict, token_or_None).

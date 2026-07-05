@@ -33,7 +33,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from explore import load_project, viewport_entry, viewport_env
+from explore import load_project, run_fixture_cmd, viewport_entry, viewport_env
 from run_scenarios import split_tcs, extract_paths, classify, tc_roles, DEFAULT_BACKEND_PREFIXES
 
 SKILL = Path(__file__).resolve().parent.parent
@@ -97,7 +97,7 @@ def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = 
                       viewport: str | None = None) -> str | None:
     """Run run_scenarios.py, fold statuses back into scenario_rows. Returns report path or None."""
     cmd = [str(SKILL / ".venv" / "bin" / "python"), str(SKILL / "runners" / "run_scenarios.py"),
-           "--alias", alias]
+           "--alias", alias, "--no-fixtures"]  # matrix seeds once for ALL combos
     if role:
         cmd += ["--role", role]
     if viewport:
@@ -297,6 +297,31 @@ def update_history(webqa: Path, run_id: str, rows: list[dict]) -> set[str]:
 
 # ---------- report ----------
 
+def render_junit_xml(alias: str, run_id: str, rows: list[dict]) -> str:
+    """Matrix rows as JUnit XML — the lingua franca of CI test reporting. One testcase
+    per row; fail/error → <failure>, manual/skip/not-run → <skipped>."""
+    from xml.sax.saxutils import escape, quoteattr
+    cases: list[str] = []
+    failures = skipped = 0
+    for r in rows:
+        bits = [r.get("file") or "", r.get("id") or "", r.get("role") or "", r.get("viewport") or ""]
+        name = quoteattr("::".join(b for b in bits if b))
+        status, note = r.get("status", "not-run"), escape(r.get("note") or "")
+        if status in ("fail", "error"):
+            failures += 1
+            cases.append(f"    <testcase name={name}><failure message=\"{status}\">{note}</failure></testcase>")
+        elif status == "pass":
+            cases.append(f"    <testcase name={name}/>")
+        else:
+            skipped += 1
+            cases.append(f"    <testcase name={name}><skipped message=\"{status}\"/></testcase>")
+    return ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            f"<testsuites name=\"web-qa-matrix\" tests=\"{len(rows)}\" failures=\"{failures}\">\n"
+            f"  <testsuite name={quoteattr(alias + ' ' + run_id)} tests=\"{len(rows)}\" "
+            f"failures=\"{failures}\" skipped=\"{skipped}\">\n"
+            + "\n".join(cases) + "\n  </testsuite>\n</testsuites>\n")
+
+
 STATUS_EMOJI = {"pass": "✅", "fail": "❌", "error": "⚠️", "manual": "✋",
                 "skip": "⏭", "flaky": "🔁", "not-run": "·"}
 GATE_BLOCKING = ("fail", "error")
@@ -348,6 +373,9 @@ def main() -> int:
     ap.add_argument("--viewports", help="comma-separated viewport names from config `viewports`; "
                                         "passive stage runs once per viewport (responsive matrix); "
                                         "a device-entry also runs specs under mobile emulation")
+    ap.add_argument("--junit", help="also write the matrix as JUnit XML to this path (CI systems)")
+    ap.add_argument("--no-fixtures", action="store_true",
+                    help="skip the project's fixture_cmd for this run")
 
     args = ap.parse_args()
 
@@ -403,6 +431,11 @@ def main() -> int:
                           "rows": rows}, ensure_ascii=False, indent=2))
         return 0
 
+    # Seed deterministic data ONCE per matrix run (not per role/viewport combo — combos
+    # must see the same world). Passive runners inside the stages skip their own seeding.
+    if not args.no_fixtures:
+        run_fixture_cmd(proj)
+
     run_id = now_run_id()
     run_dir = webqa / "reports" / f"{run_id}-matrix"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -449,6 +482,20 @@ def main() -> int:
     flaky_keys = update_history(webqa, run_id, rows)
     stats, gate_ok = snapshot("final", flaky_keys)
 
+    if args.junit:
+        junit_path = Path(args.junit)
+        junit_path.parent.mkdir(parents=True, exist_ok=True)
+        junit_path.write_text(render_junit_xml(proj["alias"], run_id, rows))
+        print(f"[matrix] junit → {junit_path}", file=sys.stderr)
+
+    # Zero-config CI summary: inside GitHub Actions the matrix lands on the run page
+    gss = os.environ.get("GITHUB_STEP_SUMMARY")
+    if gss:
+        with open(gss, "a", encoding="utf-8") as f:
+            f.write("\n" + matrix_md.read_text(encoding="utf-8"))
+
+    if not args.no_fixtures:
+        run_fixture_cmd(proj, teardown=True)
 
     print(json.dumps({"run_id": run_id, "gate_ok": gate_ok, "stats": stats,
                       "total": len(rows), "matrix": str(matrix_md)}, ensure_ascii=False))

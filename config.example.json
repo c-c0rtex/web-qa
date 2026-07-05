@@ -10,6 +10,9 @@
   "frontend_dir": null,
   "workers": null,
   "live_probe": null,
+  "fixture_cmd": null,
+  "fixture_teardown_cmd": null,
+  "network_fail_on": null,
   "test_data_prefix": "QA-",
 
   "viewports": [

@@ -32,6 +32,7 @@ from explore import (
     context_kwargs_for,
     load_project,
     resolve_credentials,
+    run_fixture_cmd,
     viewport_entry,
     viewport_suffix,
 )
@@ -304,6 +305,27 @@ def visual_diff_pct(baseline_path: Path, current_path: Path) -> float | str | No
         return None
 
 
+def save_diff_mask(baseline_path: Path, current_path: Path, out_path: Path) -> bool:
+    """Render WHERE the pixels differ (red on white) — reviewing a visual regression means
+    Reading baseline, current and this mask side by side, not staring at a percentage."""
+    try:
+        import numpy as np
+        from PIL import Image, ImageChops
+        b = Image.open(baseline_path).convert("RGB")
+        c = Image.open(current_path).convert("RGB")
+        if b.size != c.size:
+            return False
+        arr = np.asarray(ImageChops.difference(b, c))
+        mask = arr.max(axis=2) > 20
+        out = np.full((*mask.shape, 3), 255, dtype="uint8")
+        out[mask] = (220, 30, 30)
+        Image.fromarray(out).save(out_path)
+        return True
+    except Exception as e:
+        print(f"[visual] diff mask failed: {e}", file=sys.stderr)
+        return False
+
+
 def apply_visual_masks(page, mask_selectors: list[str]) -> None:
     """Hide dynamic elements (clocks, counters, avatars) before screenshotting so
     they don't produce false visual regressions. Selectors come from config
@@ -320,7 +342,8 @@ def apply_visual_masks(page, mask_selectors: list[str]) -> None:
 def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids: dict, reports_dir: Path,  # noqa: PLR0913
                    baseline_dir: Path, update_baseline: bool, visual_threshold: float,
                    backend_prefixes: tuple[str, ...], route_hints: list[dict],
-                   visual_masks: list[str], visual_exclude: list[str], vp_suffix: str = "") -> dict:
+                   visual_masks: list[str], visual_exclude: list[str], vp_suffix: str = "",
+                   update_routes: str | None = None) -> dict:
     body = tc["body"]
     fronts, backs = extract_paths(body, backend_prefixes)
     expected = expected_keywords(body)
@@ -360,7 +383,7 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
             baseline_file = baseline_dir / f"{shot_key}.png"
             if any(fnmatch.fnmatch(path, g) for g in visual_exclude):
                 visual_results.append({"path": path, "status": "excluded-data-driven"})
-            elif update_baseline:
+            elif update_baseline and (not update_routes or fnmatch.fnmatch(path, update_routes)):
                 baseline_dir.mkdir(parents=True, exist_ok=True)
                 import shutil
                 shutil.copy(shot, baseline_file)
@@ -370,13 +393,22 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
                 if pct is None:
                     visual_results.append({"path": path, "status": "diff-error"})
                 elif pct == "size-mismatch":
-                    visual_results.append({"path": path, "status": "regression", "diff_pct": "size-mismatch"})
+                    visual_results.append({"path": path, "status": "regression", "diff_pct": "size-mismatch",
+                                           "baseline": str(baseline_file), "current": shot.name})
                     overall = "fail"
                     notes.append(f"VISUAL regression on {path}: screenshot size differs from baseline")
                 elif pct > visual_threshold:
-                    visual_results.append({"path": path, "status": "regression", "diff_pct": pct})
+                    diff_shot = reports_dir / f"{tc['id']}-{shot_key}-diff.png"
+                    entry = {"path": path, "status": "regression", "diff_pct": pct,
+                             "baseline": str(baseline_file), "current": shot.name}
+                    if save_diff_mask(baseline_file, shot, diff_shot):
+                        entry["diff_image"] = diff_shot.name
+                        artifacts.append(diff_shot.name)
+                    visual_results.append(entry)
                     overall = "fail"
-                    notes.append(f"VISUAL regression on {path}: {pct:.2f}% pixels differ (threshold {visual_threshold}%)")
+                    notes.append(f"VISUAL regression on {path}: {pct:.2f}% pixels differ (threshold {visual_threshold}%)"
+                                 + " — review baseline vs current vs the diff mask, then accept with"
+                                 f" --update-baseline --routes '{path}' if intentional")
                 else:
                     visual_results.append({"path": path, "status": "match", "diff_pct": pct})
             else:
@@ -447,8 +479,12 @@ def main() -> int:
                     help="Attempt to run mutating TCs (placeholder; spec-gen not implemented)")
     ap.add_argument("--update-baseline", action="store_true",
                     help="Save current screenshots as the new visual baseline (no diff this run)")
+    ap.add_argument("--routes", help="glob limiting --update-baseline to matching routes "
+                                     "(accept one reviewed change, not everything at once)")
     ap.add_argument("--visual-threshold", type=float, default=1.0,
                     help="Visual regression threshold in %% pixels-differ (default 1.0)")
+    ap.add_argument("--no-fixtures", action="store_true",
+                    help="skip the project's fixture_cmd for this run")
     args = ap.parse_args()
 
     proj = load_project(args.alias)
@@ -465,6 +501,9 @@ def main() -> int:
     reports = project_path / ".web-qa" / "reports" / run_id
     reports.mkdir(parents=True, exist_ok=True)
     baseline_dir = project_path / ".web-qa" / "baseline"
+
+    if not args.no_fixtures:
+        run_fixture_cmd(proj)
 
     email, password = resolve_credentials(proj, args.email, args.password, args.role)
     cookies, user_me, token = api_login(backend, email, password, proj)
@@ -534,10 +573,22 @@ def main() -> int:
                     })
                     continue
 
+                nf_start = len(network_fails)
                 res = run_passive_tc(tc, page, target, backend, cookies, ids, reports,
                                      baseline_dir, args.update_baseline, args.visual_threshold,
                                      backend_prefixes, route_hints, visual_masks, visual_exclude,
-                                     vp_suffix)
+                                     vp_suffix, args.routes)
+                # Network assertion: a 5xx during THIS TC's navigation is a failure signal,
+                # not a footnote (config `network_fail_on`, default ["5xx"] — add "4xx" to
+                # tighten). Structural, language-agnostic, same as everywhere else.
+                classes = proj.get("network_fail_on") or ["5xx"]
+                bad = [nf for nf in network_fails[nf_start:]
+                       if ("5xx" in classes and 500 <= nf["status"] < 600)
+                       or ("4xx" in classes and 400 <= nf["status"] < 500)]
+                if bad and res["status"] == "pass":
+                    res["status"] = "fail"
+                    res["notes"].append("NETWORK: " + "; ".join(
+                        f"{nf['status']} {nf['method']} {nf['url'][:100]}" for nf in bad[:5]))
                 res["scenario_file"] = sf.name
                 all_results.append(res)
                 print(f"  {res['id']}: {res['status']} ({len(res.get('a11y_critical', []))} a11y critical)", file=sys.stderr)
@@ -589,6 +640,18 @@ def main() -> int:
             for v in r.get("a11y_critical", []):
                 lines.append(f"- `{v.get('path')}` [{v.get('impact')}] **{v.get('id')}** — {v.get('help')} ({v.get('nodeCount')} nodes)")
 
+    review = [(r["id"], v) for r in all_results
+              for v in r.get("visual", []) if v.get("status") == "regression"]
+    if review:
+        lines.append("\n## Visual review queue\n")
+        lines.append("Read all three images per row and judge; accept an intentional change with "
+                     "`--update-baseline --routes '<route>'`.\n")
+        for tc_id, v in review:
+            triple = f"baseline `{v.get('baseline', '?')}` · current `{v.get('current', '?')}`"
+            if v.get("diff_image"):
+                triple += f" · diff `{v['diff_image']}`"
+            lines.append(f"- {tc_id} `{v['path']}` — {v.get('diff_pct')}: {triple}")
+
     (reports / "report.md").write_text("\n".join(lines) + "\n")
     (reports / "results.json").write_text(json.dumps({
         "run_id": run_id,
@@ -609,6 +672,9 @@ def main() -> int:
         1 for r in all_results
         for v in r.get("visual", []) if v.get("status") == "regression"
     )
+
+    if not args.no_fixtures:
+        run_fixture_cmd(proj, teardown=True)
 
     print(json.dumps({
         "run_id": run_id,

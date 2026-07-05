@@ -134,6 +134,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(OPENAPI)
         elif path == "/items":
             self._html(ITEMS_HTML)
+        elif path == "/oops":
+            self._html('<!doctype html><html lang="en"><head><title>Oops</title></head>'
+                       '<body><h1>Oops page</h1><script>fetch("/api/boom")</script></body></html>')
+        elif path == "/api/boom":
+            self._json({"detail": "boom"}, 500)
         elif path == "/spa":
             self._html(SPA_HTML)
         elif path == "/spa/hidden":
