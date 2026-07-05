@@ -139,6 +139,66 @@ def test_context_kwargs_device_vs_size():
         context_kwargs_for({"device": "Nokia 3310"}, _FakePlaywright())
 
 
+# ---------- locator probe ----------
+
+
+SPEC_SNIPPET = """
+import { test, expect } from '@playwright/test';
+const APP = 'http://x';
+test('t', async ({ page }) => {
+  await page.goto(APP + '/items', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'Create item' }).click();
+  await page.getByLabel('Item name').fill('QA-x');
+  await page.getByTestId('create-item').click();
+  await page.getByRole('button', { name: /favorite/i }).click();
+  await page.getByText(`QA-${Date.now()}`).click();
+  await page.getByRole('button', { name: 'Create item' }).click();
+  await page.goto(`${APP}/article/${slug}`);
+});
+"""
+
+
+def test_extract_locators_static_literals_only():
+    from locator_probe import extract_locators
+    locs = extract_locators(SPEC_SNIPPET)
+    raws = [(loc["kind"], loc["value"], loc["name"]) for loc in locs]
+    assert ("Role", "button", "Create item") in raws     # deduped: appears twice in source
+    assert ("Label", "Item name", None) in raws
+    assert ("TestId", "create-item", None) in raws
+    assert len([r for r in raws if r == ("Role", "button", "Create item")]) == 1
+    # regex name and template value are skipped
+    assert not any("favorite" in str(r) for r in raws)
+    assert not any("${" in str(r) for r in raws)
+
+
+def test_entry_path_first_goto_only():
+    from locator_probe import entry_path
+    assert entry_path(SPEC_SNIPPET) == "/items"
+    assert entry_path("await page.goto(`${APP}/article/${slug}`);") is None  # dynamic first
+    assert entry_path("const x = 1;") is None
+
+
+def test_classify_count():
+    from locator_probe import classify_count
+    named = {"kind": "Role", "value": "button", "name": "Save"}
+    nameless = {"kind": "Role", "value": "row", "name": None}
+    text = {"kind": "Text", "value": "Widget", "name": None}
+    assert classify_count(named, 0) == "miss"
+    assert classify_count(named, 1) is None
+    assert classify_count(named, 2) == "ambiguous"
+    assert classify_count(nameless, 5) is None            # nameless role: many is normal
+    assert classify_count(text, 3) == "ambiguous"
+
+
+def test_probe_feedback_format():
+    from locator_probe import probe_feedback
+    assert probe_feedback(None) is None
+    assert probe_feedback({"url": "/x", "misses": [], "ambiguous": [], "checked": 3, "skipped": 0}) is None
+    fb = probe_feedback({"url": "/x", "misses": ["getByRole('button', { name: 'Go' })"],
+                         "ambiguous": ["getByText('a') → 3 elements"], "checked": 2, "skipped": 0})
+    assert "0 elements on `/x`" in fb and "SEVERAL elements" in fb
+
+
 # ---------- auth adapter ----------
 
 

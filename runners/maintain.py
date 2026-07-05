@@ -146,8 +146,9 @@ def record_app_bug(proj_dir: Path, spec_name: str, description: str) -> None:
 
 
 def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
-             apply_fix: bool, seed_section: str = "") -> tuple[str, str | None, str | None, str, str]:
-    """Returns (spec_name, out_file_or_None, error_or_None, kind, detail).
+             apply_fix: bool, seed_section: str = "",
+             proj: dict | None = None) -> tuple[str, str | None, str | None, str, str, str | None]:
+    """Returns (spec_name, out_file_or_None, error_or_None, kind, detail, probe_warning).
     kind: 'fix' | 'transient' | 'app-bug'."""
     prompt = FIX_PROMPT.format(
         app_context=app_context,
@@ -159,14 +160,14 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
     try:
         code = postprocess_spec(call_claude(prompt))
     except Exception as e:
-        return spec_path.name, None, f"claude failed: {e}", "fix", ""
+        return spec_path.name, None, f"claude failed: {e}", "fix", "", None
     if not code.strip():
-        return spec_path.name, None, "empty output from claude", "fix", ""
+        return spec_path.name, None, "empty output from claude", "fix", "", None
 
     kind, detail = classify_heal_output(code)
     if kind == "transient":
         # nothing to write — the spec is fine, the environment hiccuped
-        return spec_path.name, None, None, kind, detail
+        return spec_path.name, None, None, kind, detail, None
 
     if apply_fix:
         spec_path.with_suffix(spec_path.suffix + ".bak").write_text(
@@ -183,8 +184,14 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
             # roll back
             out_file.write_text(out_file.with_suffix(out_file.suffix + ".bak").read_text(encoding="utf-8"),
                                 encoding="utf-8")
-            return spec_path.name, None, f"fix did not parse, rolled back: {parse_err[:300]}", kind, detail
-    return spec_path.name, str(out_file), None, kind, detail
+            return spec_path.name, None, f"fix did not parse, rolled back: {parse_err[:300]}", kind, detail, None
+    probe_warning = None
+    if kind == "fix" and proj is not None:
+        # report-only: a healer that "fixed" the spec into non-existent elements should be
+        # visible immediately, not on the next failing run
+        from locator_probe import probe_feedback, probe_spec
+        probe_warning = probe_feedback(probe_spec(out_file, proj))
+    return spec_path.name, str(out_file), None, kind, detail, probe_warning
 
 
 def main() -> int:
@@ -219,7 +226,7 @@ def main() -> int:
 
     app_context = load_app_context(proj_dir)
     seed_section = seed_prompt_section(load_seed(proj_dir))
-    summary = {"healed": [], "transient": [], "app_bugs": [], "errors": [],
+    summary = {"healed": [], "transient": [], "app_bugs": [], "errors": [], "probe_warnings": [],
                "mode": "apply" if args.apply else "propose"}
     print(f"[maintain] {len(fails)} failing spec(s), {args.workers} workers", file=sys.stderr)
 
@@ -230,9 +237,13 @@ def main() -> int:
             if not spec_path.is_file():
                 summary["errors"].append({"spec": fname, "error": "spec file not found"})
                 continue
-            futures[pool.submit(heal_one, spec_path, errors, app_context, webqa, args.apply, seed_section)] = fname
+            futures[pool.submit(heal_one, spec_path, errors, app_context, webqa, args.apply, seed_section, proj)] = fname
         for fut in as_completed(futures):
-            name, out_file, err, kind, detail = fut.result()
+            name, out_file, err, kind, detail, probe_warning = fut.result()
+            if probe_warning:
+                summary["probe_warnings"].append({"spec": name, "warning": probe_warning})
+                print(f"[maintain] PROBE {name}: healed spec has unresolved locators\n{probe_warning}",
+                      file=sys.stderr)
             if err:
                 summary["errors"].append({"spec": name, "error": err})
                 print(f"[maintain] FAIL {name}: {err[:200]}", file=sys.stderr)

@@ -257,6 +257,35 @@ def test_interactive_pass_finds_pushstate_route_and_blocks_mutations(env):
     assert Handler.broken == broken_before               # POST /toggle-broken was aborted
 
 
+def test_locator_probe_against_live_fixture(env):
+    """The probe logs in, opens the spec's entry page and separates hits from misses —
+    zero tokens, one browser session."""
+    sys.path.insert(0, str(RUNNERS))
+    from locator_probe import probe_spec
+    spec = env["webqa"] / "specs" / "_probe_target.spec.ts"
+    spec.write_text("""
+import { test } from '@playwright/test';
+const APP = 'x';
+test('t', async ({ page }) => {
+  await page.goto(APP + '/items');
+  await page.getByTestId('create-item').click();          // exists
+  await page.getByLabel('Item name').fill('QA-1');        // exists
+  await page.getByRole('button', { name: 'No Such Button' }).click();  // miss
+});
+""")
+    proj = {"alias": "fx", "path": str(env["root"]), "target_url": env["base"],
+            "backend_url": env["base"],
+            "auth": {"email": "admin@example.com", "password": "secret"}}
+    try:
+        res = probe_spec(spec, proj)
+    finally:
+        spec.unlink()
+    assert res is not None
+    assert res["url"] == "/items" and res["checked"] == 3
+    assert res["misses"] == ["getByRole('button', { name: 'No Such Button' })"]
+    assert res["ambiguous"] == []
+
+
 def test_maintain_appbug_fixmes_and_records_bug(env):
     spec = env["webqa"] / "specs" / "t2.spec.ts"
     spec.write_text("original-content")

@@ -106,6 +106,18 @@ YOUR PREVIOUS ATTEMPT FAILED — playwright could not parse the generated file:
 Output the FULL corrected .spec.ts (just the code, no fences):
 """
 
+PROBE_RETRY_SUFFIX = """
+
+A LIVE LOCATOR CHECK ran your previous attempt's locators against the RUNNING app.
+Problems found on the spec's entry page:
+{feedback}
+
+Fix these locators using labels from the APP MAP / ARIA snapshots above — they are the
+ground truth. EXCEPTION: if an element only appears after an interaction (a dialog, a
+later step of the flow), it cannot exist on the entry page — keep such locators as they
+are. Output the FULL corrected .spec.ts (just the code, no fences):
+"""
+
 
 def slugify(s: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9-]+", "-", s).strip("-").lower()
@@ -208,10 +220,17 @@ def seed_prompt_section(seed: str) -> str:
             "patterns VERBATIM instead of inventing your own):\n```ts\n" + seed + "\n```\n")
 
 
-def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path) -> tuple[str, str | None]:
-    """Generate + validate one spec. Returns (tc_key, error_or_None)."""
+def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
+            proj: dict | None = None, live_probe: bool = True) -> tuple[str, str | None, str | None]:
+    """Generate + validate one spec. Returns (tc_key, error_or_None, probe_warning_or_None).
+
+    Acceptance ladder: parse check (`--list`) is a hard gate with retry; the live locator
+    probe earns ONE extra retry with real-DOM feedback, but never blocks acceptance — a
+    probed miss can legitimately be a mid-flow element the entry page doesn't have."""
+    from locator_probe import probe_feedback, probe_spec
     attempt_prompt = prompt
     last_err: str | None = None
+    probe_retried = False
     for _ in range(GEN_ATTEMPTS):
         code = call_claude(attempt_prompt)
         if not code.strip():
@@ -219,15 +238,23 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path) -> tuple[str,
             continue
         out_path.write_text(postprocess_spec(code), encoding="utf-8")
         parse_err = validate_spec(webqa, out_path)
-        if parse_err is None:
-            return tc_key, None
-        last_err = f"playwright --list rejected spec: {parse_err}"
-        attempt_prompt = prompt + RETRY_SUFFIX.format(error=parse_err)
-    return tc_key, last_err
+        if parse_err is not None:
+            last_err = f"playwright --list rejected spec: {parse_err}"
+            attempt_prompt = prompt + RETRY_SUFFIX.format(error=parse_err)
+            continue
+        fb = None
+        if proj is not None and live_probe:
+            fb = probe_feedback(probe_spec(out_path, proj))
+        if fb and not probe_retried:
+            probe_retried = True
+            attempt_prompt = prompt + PROBE_RETRY_SUFFIX.format(feedback=fb)
+            continue
+        return tc_key, None, fb
+    return tc_key, last_err, None
 
 
 def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
-              force: bool = False, workers: int = 3) -> dict:
+              force: bool = False, workers: int = 3, live_probe: bool = True) -> dict:
     proj = load_project(alias)
     proj_dir = Path(proj["path"])
     webqa = proj_dir / ".web-qa"
@@ -253,7 +280,10 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     if not md_files:
         return {"error": f"no scenarios in {scenarios_dir}"}
 
-    summary = {"generated": [], "skipped_cached": [], "skipped_passive": [], "errors": []}
+    # config `live_probe: false` disables the live locator check (e.g. CI without a stand)
+    live_probe = live_probe and proj.get("live_probe") is not False
+    summary = {"generated": [], "skipped_cached": [], "skipped_passive": [], "errors": [],
+               "probe_warnings": []}
     jobs: list[tuple[str, str, Path, str]] = []  # (tc_key, prompt, out_path, body_hash)
 
     for md in md_files:
@@ -304,15 +334,21 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
         hash_by_key = {k: h for k, _, _, h in jobs}
         path_by_key = {k: o for k, _, o, _ in jobs}
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futures = {pool.submit(gen_one, k, p, o, webqa): k for k, p, o, _ in jobs}
+            futures = {pool.submit(gen_one, k, p, o, webqa, proj, live_probe): k
+                       for k, p, o, _ in jobs}
             for fut in as_completed(futures):
                 tc_key = futures[fut]
                 out_path = path_by_key[tc_key]
                 marker = out_path.with_name(out_path.name + ".FAILED")
+                warning = None
                 try:
-                    _, err = fut.result()
+                    _, err, warning = fut.result()
                 except Exception as e:
                     err = str(e)
+                if warning:
+                    summary["probe_warnings"].append({"tc": tc_key, "warning": warning})
+                    print(f"[gen] PROBE {tc_key}: unresolved locators remain\n{warning}",
+                          file=sys.stderr, flush=True)
                 if err is None:
                     cache[tc_key] = hash_by_key[tc_key]
                     summary["generated"].append(tc_key)
@@ -336,10 +372,12 @@ def main() -> int:
     ap.add_argument("--tc", help="only generate this TC id (e.g. TC-I4)")
     ap.add_argument("--force", action="store_true", help="ignore cache")
     ap.add_argument("--workers", type=int, default=3, help="parallel claude calls (default 3)")
+    ap.add_argument("--no-probe", action="store_true",
+                    help="skip the live locator check against the running app")
     args = ap.parse_args()
 
     res = gen_specs(args.alias, all_tcs=args.all, only_tc=args.tc, force=args.force,
-                    workers=args.workers)
+                    workers=args.workers, live_probe=not args.no_probe)
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0 if not res.get("errors") else 1
 

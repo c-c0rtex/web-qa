@@ -9,6 +9,7 @@
   "language": "English",
   "frontend_dir": null,
   "workers": null,
+  "live_probe": null,
   "test_data_prefix": "QA-",
 
   "viewports": [
