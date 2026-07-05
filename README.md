@@ -31,11 +31,11 @@ LLM-driven browser testing is usually done by driving a browser through MCP step
 
 1. **Explore** — a plain Playwright crawler logs in and maps your app once: routes, forms, real button labels, table headers, OpenAPI request schemas → `app.context.md` (cached in your repo). Routes declared in your source (Next/Nuxt/SvelteKit file routers, router configs) are mined statically and crawled even when no link points at them; an opt-in `--interactive` pass clicks through runtime-only navigation with all non-GET requests blocked at the network level.
 2. **Generate** — test cases (markdown) are produced from a git diff or a task description, grounded in that map.
-3. **Automate** — each test case becomes a self-contained `.spec.ts` via a single `claude -p` call. The prompt embeds the app map, so selectors come from *real* labels, not guesses. Every spec is validated with `playwright test --list` before it's accepted (one retry with the parse error fed back).
-4. **Run** — plain `npx playwright test` + axe-core injection + pixel-diff visual regression. No LLM in the loop at run time: running your suite costs zero tokens.
-5. **Maintain** — a failing spec plus its real error output goes back to the LLM, which returns a corrected spec. Proposed by default (`*.spec.ts.proposed`); `--apply` to overwrite with backup and automatic rollback if the fix doesn't parse.
+3. **Automate** — each test case becomes a self-contained `.spec.ts` via a single `claude -p` call. The prompt embeds the app map, so selectors come from *real* labels, not guesses. Every spec is validated twice before it's accepted: `playwright test --list` (does it parse?) and a **live locator probe** — the generated locators are counted against the running app, and misses come back as a regeneration retry with real-DOM feedback.
+4. **Run** — plain `npx playwright test` + axe-core injection + pixel-diff visual regression + network assertions (a 5xx fired during a page's navigation fails its test). No LLM in the loop at run time: running your suite costs zero tokens. Visual regressions produce a baseline/current/diff-mask image triple and are accepted per route, not all-or-nothing.
+5. **Maintain** — a failing spec plus its real error output *and Playwright's ARIA snapshot of the failure moment* goes back to the LLM, which returns a corrected spec. Proposed by default (`*.spec.ts.proposed`); `--apply` to overwrite with backup and automatic rollback if the fix doesn't parse.
 
-Plus a **deploy gate**: `web-qa-matrix` inventories *all* tests in a project (scenario TCs + specs), runs everything, reports route coverage and flaky tests, and returns exit 0/1 — drop it in front of your deploy script.
+Plus a **deploy gate**: `web-qa-matrix` inventories *all* tests in a project (scenario TCs + specs), seeds deterministic data via your `fixture_cmd`, runs everything, reports route coverage and flaky tests, and returns exit 0/1 — drop it in front of your deploy script. It speaks CI natively: `--junit` exports the matrix as JUnit XML, and inside GitHub Actions the report lands on the run page via `$GITHUB_STEP_SUMMARY` automatically.
 
 ```
 web-qa-matrix --alias my-app && ./deploy.sh
@@ -92,7 +92,7 @@ web-qa is a skill: normally you don't type the CLI yourself — you ask your cod
 | *"I changed the role permissions — check all roles"* | RBAC directive kicks in: allowed+denied TC pairs per role, matrix `--roles admin,editor,viewer` |
 | *"Test the mobile version of the orders page"* | `explore --viewport mobile` (mobile app map) → mobile scenarios → `run --viewport mobile` with its own baselines |
 | *"This test keeps failing, fix it"* | `maintain` — proposes a healed spec from the real error output; applies only if you say so |
-| *"The redesign is intentional — update the baselines"* | `run --update-baseline` |
+| *"The redesign is intentional — update the baselines"* | reviews the baseline/current/diff triple, then `run --update-baseline --routes '<route>'` per accepted change |
 | *"Show me how /orders looks right now"* | takes a screenshot, reads it, describes what it sees |
 
 The agent-facing contract (which command for which intent, business rules, config keys) lives in [SKILL.md](SKILL.md) — that's what your agent reads when the skill activates.
@@ -106,8 +106,9 @@ The agent-facing contract (which command for which intent, business rules, confi
 | `web-qa-generate --alias my-app --task "date filter on /orders"` | Scenarios from a plain-text task |
 | `web-qa-spec-gen --alias my-app --all` | Scenarios → Playwright specs (parallel, validated) |
 | `web-qa-run --alias my-app` | Passive checks: navigation, content, a11y, visual |
-| `web-qa-matrix --alias my-app` | Everything at once + deploy verdict (exit code) |
-| `web-qa-maintain --alias my-app --apply` | Heal failing specs from their real errors |
+| `web-qa-matrix --alias my-app [--junit report.xml]` | Everything at once + deploy verdict (exit code); JUnit export for CI |
+| `web-qa-maintain --alias my-app --apply [--with-screens]` | Heal failing specs from their real errors + failure-moment ARIA snapshots |
+| `web-qa-run --alias my-app --update-baseline --routes '/orders'` | Accept one reviewed visual change, not everything at once |
 | `web-qa-kill` | Clean up orphaned headless browsers after a killed run |
 
 RBAC and responsive are matrix dimensions: `web-qa-matrix --roles admin,viewer --viewports desktop,mobile` runs the passive stage per combination (mobile = real device emulation: touch, UA, DPR — via Playwright device descriptors), reports per-role route coverage, and a device viewport also runs specs under mobile emulation. Per-viewport visual baselines are kept apart (`@mobile` suffix).
