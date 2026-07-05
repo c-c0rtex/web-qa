@@ -139,6 +139,47 @@ def test_context_kwargs_device_vs_size():
         context_kwargs_for({"device": "Nokia 3310"}, _FakePlaywright())
 
 
+# ---------- registry ----------
+
+
+def test_registry_resolution_order(tmp_path, monkeypatch):
+    import registry
+    monkeypatch.setattr(registry, "SKILL_ROOT", tmp_path / "skill")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("WEBQA_REGISTRY", raising=False)
+    # nothing exists → default (skill root) for a clear error message
+    assert registry.registry_path() == tmp_path / "skill" / "projects.json"
+    # xdg exists → used
+    xdg_reg = tmp_path / "xdg" / "web-qa" / "projects.json"
+    xdg_reg.parent.mkdir(parents=True)
+    xdg_reg.write_text("[]")
+    assert registry.registry_path() == xdg_reg
+    # skill-root registry beats xdg (classic install keeps working untouched)
+    local = tmp_path / "skill" / "projects.json"
+    local.parent.mkdir(parents=True)
+    local.write_text("[]")
+    assert registry.registry_path() == local
+    # env beats everything
+    monkeypatch.setenv("WEBQA_REGISTRY", str(tmp_path / "custom.json"))
+    assert registry.registry_path() == tmp_path / "custom.json"
+
+
+def test_registry_write_path_plugin_install_goes_to_xdg(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import registry
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("WEBQA_REGISTRY", raising=False)
+    plugin_root = Path.home() / ".claude" / "plugins" / "cache" / "mp" / "web-qa" / "0.3.3"
+    monkeypatch.setattr(registry, "SKILL_ROOT", plugin_root)
+    # fresh plugin install: no registry anywhere → write to the stable XDG path,
+    # NOT into the version-scoped cache dir that vanishes on update
+    assert registry.registry_write_path() == tmp_path / "xdg" / "web-qa" / "projects.json"
+    # classic install keeps the skill root
+    monkeypatch.setattr(registry, "SKILL_ROOT", tmp_path / "skill")
+    assert registry.registry_write_path() == tmp_path / "skill" / "projects.json"
+
+
 # ---------- route_mine ----------
 
 

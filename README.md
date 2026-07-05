@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/c-c0rtex/web-qa/ci.yml?style=flat-square&label=CI" alt="CI">
-  <img src="https://img.shields.io/badge/version-0.3.2-blue?style=flat-square" alt="Version 0.3.2">
+  <img src="https://img.shields.io/badge/version-0.3.3-blue?style=flat-square" alt="Version 0.3.3">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/uv-managed-DE5FE9?style=flat-square" alt="uv">
@@ -48,6 +48,17 @@ web-qa-matrix --alias my-app && ./deploy.sh
 - A web app running locally (or reachable) with login credentials
 
 ## Install
+
+As a Claude Code plugin (from inside Claude Code):
+
+```
+/plugin marketplace add c-c0rtex/web-qa
+/plugin install web-qa@c-c0rtex
+```
+
+Then ask your agent to *"set up web-qa"* — on first use it runs `install.sh` (uv sync + chromium) for you. Plugin installs keep the project registry in `~/.config/web-qa/projects.json`, so it survives plugin updates.
+
+Or as a plain skill:
 
 ```bash
 git clone https://github.com/c-c0rtex/web-qa ~/.claude/skills/web-qa

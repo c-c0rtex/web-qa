@@ -1,0 +1,11 @@
+{
+  "name": "web-qa",
+  "displayName": "Web QA",
+  "version": "0.3.3",
+  "description": "Autonomous web-app QA: Playwright E2E, visual regression, axe-core accessibility — scenarios generated from a git diff or a task, specs grounded in a crawled app map, zero-token test runs, self-healing failures.",
+  "author": { "name": "c-c0rtex", "url": "https://github.com/c-c0rtex" },
+  "homepage": "https://github.com/c-c0rtex/web-qa",
+  "repository": "https://github.com/c-c0rtex/web-qa",
+  "license": "MIT",
+  "keywords": ["qa", "testing", "playwright", "e2e", "visual-regression", "accessibility", "axe-core", "test-automation"]
+}

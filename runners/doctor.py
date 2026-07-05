@@ -17,6 +17,7 @@ import json
 import shutil
 from pathlib import Path
 
+from registry import registry_path
 
 SKILL = Path(__file__).resolve().parent.parent
 
@@ -69,11 +70,11 @@ def check_environment(results: list[dict]) -> None:
         check(results, "node/npx", WARN, "npx not on PATH",
               "needed for `npx playwright test` (specs stage)")
 
-    # registry
-    reg = SKILL / "projects.json"
+    # registry (env override → skill root → ~/.config/web-qa for plugin installs)
+    reg = registry_path()
     if not reg.is_file():
         check(results, "projects.json", FAIL, f"missing at {reg}",
-              "cp projects.example.json projects.json, then register a project")
+              "run bin/web-qa-register-project <alias> --target-url <url>")
         return
     try:
         entries = json.loads(reg.read_text())

@@ -6,6 +6,21 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.3.3 (map completeness & plugin distribution)
+
+- **Language-agnostic TC classification** — the declared `**Type:**` field is the single
+  source of truth (structural evidence in `**Steps:**` overrides a mislabeled `passive`);
+  prose keyword matching removed entirely, TCs work identically in any language
+- **Static route mining** — routes declared in the app's source (Next/Nuxt/SvelteKit file
+  routers, router configs) seed the crawl and expand the coverage denominator; new `Origin`
+  column in the Routes table, `frontend_dir` config key for monorepos
+- **`--interactive` crawl pass (opt-in)** — clicks through runtime-only navigation
+  (pushState buttons without `<a href>`); mutation safety enforced at the network level:
+  all non-GET requests aborted during the pass
+- **Claude Code plugin** — installable via `/plugin marketplace add c-c0rtex/web-qa` →
+  `/plugin install web-qa@c-c0rtex`; registry moves to `~/.config/web-qa/projects.json`
+  for plugin installs so it survives updates
+
 ## Shipped — v0.3.2 (industry best practices)
 
 - **Seed spec grounding** — optional committed `.web-qa/seed.spec.ts` (human-verified

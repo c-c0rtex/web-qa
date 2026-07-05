@@ -30,14 +30,16 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from playwright.sync_api import sync_playwright
 
+from registry import registry_path
 from route_mine import as_template, mine_routes
 
 
 def load_project(alias: str) -> dict:
     """Registry entry merged with <project>/.web-qa/config.json (project keys win, None ignored).
-    WEBQA_REGISTRY env overrides the registry path (integration tests, CI)."""
-    import os
-    reg = Path(os.environ.get("WEBQA_REGISTRY") or Path(__file__).resolve().parent.parent / "projects.json")
+    Registry resolution (env override, skill root, XDG for plugin installs) lives in registry.py."""
+    reg = registry_path()
+    if not reg.is_file():
+        raise SystemExit(f"no registry at {reg} — run web-qa-register-project first")
     entries = json.loads(reg.read_text())
     for e in entries:
         if e.get("alias") == alias:

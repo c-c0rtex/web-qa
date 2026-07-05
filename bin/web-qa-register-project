@@ -20,7 +20,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-REGISTRY = ROOT / "projects.json"
+sys.path.insert(0, str(ROOT / "runners"))
+from registry import registry_write_path  # noqa: E402
+
+REGISTRY = registry_write_path()
 
 
 def load() -> list[dict]:
@@ -33,6 +36,7 @@ def load() -> list[dict]:
 
 
 def save(entries: list[dict]) -> None:
+    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     REGISTRY.write_text(json.dumps(entries, ensure_ascii=False, indent=2))
 
 

@@ -5,6 +5,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+echo "== plugin manifests"
+python3 -m json.tool .claude-plugin/plugin.json > /dev/null
+python3 -m json.tool .claude-plugin/marketplace.json > /dev/null
+if command -v claude > /dev/null; then
+  claude plugin validate . --strict > /dev/null
+fi
+
 echo "== sync";        uv sync -q
 echo "== lint";        uv run ruff check runners tests
 echo "== unit";        uv run pytest -q

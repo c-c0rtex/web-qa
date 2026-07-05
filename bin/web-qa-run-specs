@@ -22,7 +22,9 @@ fi
 
 PROJECT_PATH=$(python3 -c "
 import json, sys
-with open('$SKILL_DIR/projects.json') as f:
+sys.path.insert(0, '$SKILL_DIR/runners')
+from registry import registry_path
+with open(registry_path()) as f:
     for p in json.load(f):
         if p['alias'] == '$ALIAS':
             print(p['path']); sys.exit(0)
