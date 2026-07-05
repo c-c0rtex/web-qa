@@ -207,7 +207,7 @@ def main() -> int:
         report_path = webqa / "reports" / "maintain-playwright-results.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         print("[maintain] running playwright to collect failures…", file=sys.stderr)
-        run_playwright_json(webqa, report_path, args.pw_workers, viewport_env(proj))
+        run_playwright_json(webqa, report_path, args.pw_workers or proj.get("workers"), viewport_env(proj))
     if not report_path.is_file():
         print(json.dumps({"error": f"no report at {report_path}"}), file=sys.stderr)
         return 2

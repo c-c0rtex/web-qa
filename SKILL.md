@@ -113,6 +113,7 @@ Shared runners, project specifics in two places:
   - `gate_exclude` — spec globs excluded from the deploy matrix (features hidden on prod behind flags/build-args), e.g. `["analytics*"]`. Default: empty
   - `language` — language for generated scenario steps (default `"English"`)
   - `frontend_dir` — path (relative to the project root) of the frontend app inside a monorepo; route mining scans there. Default: project root
+  - `workers` — Playwright workers for matrix/maintain runs. Set `1` for small dev stands: parallel chromiums against one dev server turn timing into flaky noise. CLI `--workers` overrides. Default: template default
   - `viewport` — `{"width": W, "height": H}`, applied consistently to the crawler, the passive runner AND the specs config (via `WEBQA_VIEWPORT`, set automatically by matrix/maintain). Default: 1280×900 everywhere. Changing it invalidates visual baselines (size-mismatch) — re-run `--update-baseline` after
   - `viewports` — named list for responsive testing: `[{"name": "desktop", "width": 1280, "height": 900}, {"name": "mobile", "device": "iPhone 14"}]`. `device` entries use full Playwright descriptors (touch, mobile UA, DPR) — real emulation, not a narrow window. First entry = project default (keeps unsuffixed baselines); others get their own baseline set (`<route>@<name>.png`). Used by `--viewport` (explore/run) and `--viewports` (matrix)
 

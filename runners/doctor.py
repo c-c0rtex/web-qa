@@ -122,6 +122,32 @@ def check_project(results: list[dict], alias: str) -> None:
     configured = bool(proj.get("viewport") or proj.get("viewports"))
     check(results, "viewport", OK, desc + ("" if configured else " (default)"))
 
+    # device viewports may need a non-chromium engine (iPhone → webkit) that isn't
+    # installed — the specs stage then dies with "Executable doesn't exist"
+    device_names = [e["device"] for e in entries if e.get("device")]
+    if device_names:
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                for name in device_names:
+                    d = p.devices.get(name)
+                    if not d:
+                        check(results, f"device: {name}", FAIL, "unknown Playwright device descriptor",
+                              "pick an exact name from Playwright's device list")
+                        continue
+                    engine = d.get("default_browser_type", "chromium")
+                    if engine == "chromium":
+                        check(results, f"device: {name}", OK, "chromium engine")
+                        continue
+                    exe = Path(getattr(p, engine).executable_path)
+                    if exe.exists():
+                        check(results, f"device: {name}", OK, f"{engine} installed")
+                    else:
+                        check(results, f"device: {name}", FAIL, f"needs {engine}, which is not installed",
+                              f"uv run playwright install {engine} — or use a chromium device (e.g. Pixel 7)")
+        except Exception as e:
+            check(results, "device engines", WARN, f"could not verify: {str(e)[:80]}")
+
     # reachability
     target = proj.get("target_url")
     if not target:

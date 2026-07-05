@@ -41,6 +41,8 @@ Plus a **deploy gate**: `web-qa-matrix` inventories *all* tests in a project (sc
 web-qa-matrix --alias my-app && ./deploy.sh
 ```
 
+Want to see the output before installing? **[web-qa-demo](https://github.com/c-c0rtex/web-qa-demo)** runs the full pipeline against a real [RealWorld](https://github.com/gothinkster/realworld) stack — the crawled map, generated scenarios and specs, the deploy-gate matrix, and the real bugs it found in upstream code are all committed there.
+
 ## Requirements
 
 - Linux/macOS, Python 3.11+, Node.js 18+, [uv](https://docs.astral.sh/uv/)

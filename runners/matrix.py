@@ -440,7 +440,10 @@ def main() -> int:
             snapshot(f"passive{label}")
     if spec_rows and not args.skip_specs:
         print(f"[matrix] specs stage: {len(spec_rows)} spec files", file=sys.stderr)
-        run_specs_stage(webqa, spec_rows, run_dir, args.workers, viewport_env(proj), mobile_device)
+        # CLI --workers > config `workers` (small dev stands want 1: parallel chromiums
+        # against one dev server turn timing into noise) > template default
+        run_specs_stage(webqa, spec_rows, run_dir, args.workers or proj.get("workers"),
+                        viewport_env(proj), mobile_device)
         snapshot("specs")
 
     flaky_keys = update_history(webqa, run_id, rows)

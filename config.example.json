@@ -8,6 +8,7 @@
   "stack": "Next.js + FastAPI admin",
   "language": "English",
   "frontend_dir": null,
+  "workers": null,
   "test_data_prefix": "QA-",
 
   "viewports": [
