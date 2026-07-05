@@ -173,10 +173,11 @@ def test_matrix_inventory_and_coverage(env):
     data = json.loads(out)
     assert data["scenario_tcs"] >= 3
     assert data["coverage"]["routes_total"] >= 2              # / and /items from the map
-    # `/items` is referenced by TC text; `/` is only reachable via route_hints inference,
-    # which coverage deliberately does not count — so it must show up as uncovered
-    assert data["coverage"]["covered"] >= 1
-    assert "/" in data["coverage"]["uncovered"]
+    # `/` and `/items` are referenced by TC text (`Open \`/\``, `Open \`/items\``) — both
+    # count as covered; /spa has no TC at all and must show up as uncovered
+    assert data["coverage"]["covered"] >= 2
+    assert "/spa" in data["coverage"]["uncovered"]
+    assert "/" not in data["coverage"]["uncovered"]
 
 
 def test_spec_gen_with_stub_llm_and_cache(env):

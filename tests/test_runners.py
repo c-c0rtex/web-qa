@@ -304,6 +304,16 @@ def test_extract_paths_separates_frontend_and_backend():
     assert backs == [("GET", "/orders/facets")]
 
 
+def test_extract_paths_bare_root_and_query_collapse():
+    # `/` and `/?limit=10&offset=0` are the same route — SPAs put pagination in the query
+    fronts, _ = extract_paths("Navigate to `/?limit=10&offset=0`.", BACKEND_PREFIXES)
+    assert fronts == ["/"]
+    fronts, _ = extract_paths("Open `/` and check the feed", BACKEND_PREFIXES)
+    assert fronts == ["/"]
+    fronts, _ = extract_paths("Open `/orders?page=2`", BACKEND_PREFIXES)
+    assert fronts == ["/orders"]
+
+
 def test_classify_declared_type_beats_absence():
     kind, reasons = classify("**Type:** passive\n**Steps:**\n1. open `/orders`\n2. GET `/orders`")
     assert kind == "passive" and reasons == []

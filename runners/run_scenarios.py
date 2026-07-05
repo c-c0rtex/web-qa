@@ -44,7 +44,7 @@ def now_run_id() -> str:
 # Patterns
 RE_TC_HEADER = re.compile(r"^##\s+(TC-[A-Za-z0-9-]+)\s*[—-]\s*(.+?)(?:\s+\(.*?\))?$", re.MULTILINE)
 RE_BACKEND_OP = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+`?(/[a-z][a-zA-Z0-9/_\-{}.]*)`?", re.IGNORECASE)
-RE_PATH_BACKTICKED = re.compile(r"`(/[a-z][a-z0-9/_\-{}.]*)`", re.IGNORECASE)
+RE_PATH_BACKTICKED = re.compile(r"`(/(?:[a-z][a-z0-9/_\-{}.]*)?(?:\?[^`\s]*)?)`", re.IGNORECASE)
 RE_PATH_PLAIN = re.compile(r"(?<![A-Za-z0-9/])(/[a-z][a-z0-9/_\-{}.]*)(?![A-Za-z0-9/.])")
 RE_TC_TYPE = re.compile(r"\*\*Type:\*\*\s*`?(passive|mutating)`?", re.IGNORECASE)
 MUTATING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
@@ -98,9 +98,10 @@ def extract_paths(text: str, backend_prefixes: tuple[str, ...] = DEFAULT_BACKEND
 
     fronts: list[str] = []
     seen_f: set[str] = set()
-    # 1. Backticked paths (most reliable)
+    # 1. Backticked paths (most reliable). Query strings collapse to the route itself,
+    # so the bare root — `/` or `/?limit=10&offset=0` — is extractable like any path.
     for m in RE_PATH_BACKTICKED.finditer(text):
-        p = m.group(1).rstrip(".,;:")
+        p = m.group(1).rstrip(".,;:").split("?")[0] or "/"
         if p in backend_only_paths or p in seen_f:
             continue
         if is_backend_path(p, backend_prefixes):
