@@ -215,6 +215,46 @@ def test_maintain_transient_leaves_spec_untouched(env):
     assert not spec.with_suffix(".spec.ts.proposed").exists()
 
 
+def test_explore_mines_code_routes_and_seeds_crawl(env, tmp_path):
+    """Static mining: routes declared in source land in the map even without inbound links.
+    A concrete mined route (/ghost) gets crawled via seeding; a parametrized one
+    (/orders/{orderId}) is listed as declared-but-not-crawled and grows the coverage
+    denominator."""
+    root = tmp_path / "proj"
+    (root / ".web-qa").mkdir(parents=True)
+    for rel in ("app/ghost/page.tsx", "app/orders/[orderId]/page.tsx"):
+        f = root / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("")
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps([{
+        "alias": "mx", "path": str(root), "target_url": env["base"], "backend_url": env["base"],
+        "auth": {"email": "admin@example.com", "password": "secret"},
+    }]))
+    e = dict(env["env"], WEBQA_REGISTRY=str(registry))
+    rc, out, err = run_runner("explore.py", ["--alias", "mx", "--max-pages", "8"], e)
+    assert rc == 0, err
+    assert last_json(out)["routes_mined"] == 2
+    ctx = (root / ".web-qa" / "app.context.md").read_text()
+    ghost_row = next(ln for ln in ctx.splitlines() if ln.startswith("| `/ghost`"))
+    assert "crawl+code" in ghost_row                     # seeded goto despite zero links to it
+    param_row = next(ln for ln in ctx.splitlines() if ln.startswith("| `/orders/{orderId}`"))
+    assert "code:next-app" in param_row and "not reached by crawl" in param_row
+
+
+def test_interactive_pass_finds_pushstate_route_and_blocks_mutations(env):
+    """--interactive discovers a route reachable only through a pushState button, while the
+    network valve stops the 'dangerous' button's POST from ever hitting the backend."""
+    from fixture_app import Handler
+    broken_before = Handler.broken
+    rc, out, err = run_runner(
+        "explore.py", ["--alias", "fx", "--max-pages", "10", "--interactive"], env["env"])
+    assert rc == 0, err
+    ctx = (env["webqa"] / "app.context.md").read_text()
+    assert "`/spa/hidden`" in ctx                        # no <a href> points there
+    assert Handler.broken == broken_before               # POST /toggle-broken was aborted
+
+
 def test_maintain_appbug_fixmes_and_records_bug(env):
     spec = env["webqa"] / "specs" / "t2.spec.ts"
     spec.write_text("original-content")

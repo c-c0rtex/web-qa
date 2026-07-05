@@ -29,7 +29,7 @@ web-qa splits the jobs: the model *generates* the checks, a deterministic oracle
 
 LLM-driven browser testing is usually done by driving a browser through MCP step by step — powerful, but token-hungry. This skill takes a cheaper route:
 
-1. **Explore** — a plain Playwright crawler logs in and maps your app once: routes, forms, real button labels, table headers, OpenAPI request schemas → `app.context.md` (cached in your repo).
+1. **Explore** — a plain Playwright crawler logs in and maps your app once: routes, forms, real button labels, table headers, OpenAPI request schemas → `app.context.md` (cached in your repo). Routes declared in your source (Next/Nuxt/SvelteKit file routers, router configs) are mined statically and crawled even when no link points at them; an opt-in `--interactive` pass clicks through runtime-only navigation with all non-GET requests blocked at the network level.
 2. **Generate** — test cases (markdown) are produced from a git diff or a task description, grounded in that map.
 3. **Automate** — each test case becomes a self-contained `.spec.ts` via a single `claude -p` call. The prompt embeds the app map, so selectors come from *real* labels, not guesses. Every spec is validated with `playwright test --list` before it's accepted (one retry with the parse error fed back).
 4. **Run** — plain `npx playwright test` + axe-core injection + pixel-diff visual regression. No LLM in the loop at run time: running your suite costs zero tokens.

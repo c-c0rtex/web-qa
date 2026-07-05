@@ -139,6 +139,70 @@ def test_context_kwargs_device_vs_size():
         context_kwargs_for({"device": "Nokia 3310"}, _FakePlaywright())
 
 
+# ---------- route_mine ----------
+
+
+def _touch(root, *rel):
+    p = root.joinpath(*rel)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("")
+    return p
+
+
+def test_mine_next_app_router(tmp_path):
+    from route_mine import mine_routes
+    _touch(tmp_path, "app", "page.tsx")
+    _touch(tmp_path, "app", "orders", "[orderId]", "page.tsx")
+    _touch(tmp_path, "app", "(dashboard)", "settings", "page.tsx")   # group stripped
+    _touch(tmp_path, "app", "_private", "page.tsx")                  # opted out
+    _touch(tmp_path, "app", "api", "route.ts")                       # not a page
+    _touch(tmp_path, "node_modules", "lib", "app", "page.tsx")       # pruned
+    paths = [m["path"] for m in mine_routes(tmp_path)]
+    assert paths == ["/", "/orders/{orderId}", "/settings"]
+
+
+def test_mine_pages_router_and_nuxt(tmp_path):
+    from route_mine import mine_routes
+    _touch(tmp_path, "pages", "index.tsx")
+    _touch(tmp_path, "pages", "orders", "[id].tsx")
+    _touch(tmp_path, "pages", "_app.tsx")
+    _touch(tmp_path, "pages", "api", "users.ts")
+    _touch(tmp_path, "pages", "profile", "_tab.vue")                 # Nuxt2 dynamic
+    paths = [m["path"] for m in mine_routes(tmp_path)]
+    assert paths == ["/", "/orders/{id}", "/profile/{tab}"]
+
+
+def test_mine_router_config_absolute_only(tmp_path):
+    from route_mine import mine_routes
+    _touch(tmp_path, "src", "router.ts").write_text(
+        "const routes = ["
+        "{path: '/admin', component: A},"
+        "{path: 'edit', component: B},"          # relative child — skipped
+        "{path: '/users/:userId', component: C},"
+        "{path: '/*', component: NotFound},"     # wildcard — skipped
+        "]; export const x = <Route path=\"/reports\" element={<R/>} />;")
+    paths = [m["path"] for m in mine_routes(tmp_path)]
+    assert paths == ["/admin", "/reports", "/users/{userId}"]
+
+
+def test_as_template_unifies_params_and_ids():
+    from route_mine import as_template
+    assert as_template("/orders/{orderId}") == "/orders/{id}"
+    assert as_template("/orders/42") == "/orders/{id}"
+    assert as_template("/orders/{orderId}/items/7") == "/orders/{id}/items/{id}"
+
+
+def test_annotate_origins_marks_and_appends():
+    from explore import annotate_origins
+    pages = [{"path": "/orders/42", "title": "Order"}, {"path": "/", "title": "Home"}]
+    mined = [{"path": "/orders/{orderId}", "source": "next-app"},
+             {"path": "/settings", "source": "next-app"}]
+    out = annotate_origins(pages, mined)
+    assert out[0]["origin"] == "crawl+code"       # /orders/42 matches /orders/{orderId}
+    assert out[1]["origin"] == "crawl"
+    assert out[2] == {"path": "/settings", "origin": "code:next-app", "uncrawled": True}
+
+
 # ---------- run_scenarios ----------
 
 BACKEND_PREFIXES = ("/auth", "/orders/facets", "/orders/{")

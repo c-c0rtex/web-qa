@@ -207,8 +207,10 @@ def routes_from_context(webqa: Path) -> list[str]:
         return []
     routes: list[str] = []
     for m in re.finditer(r"^\|\s*`(/[^`\s]*)`\s*\|", ctx.read_text(encoding="utf-8"), re.MULTILINE):
-        # collapse concrete entity ids: /orders/235 → /orders/{id} (one template = one route)
-        r = re.sub(r"/\d+(?=/|$)", "/{id}", m.group(1).split("?")[0])
+        # collapse to one template per route: /orders/235 and code-mined /orders/{orderId}
+        # are the same coverage unit as /orders/{id}
+        r = re.sub(r"\{[^}]+\}", "{id}", m.group(1).split("?")[0])
+        r = re.sub(r"/\d+(?=/|$)", "/{id}", r)
         if r not in routes:
             routes.append(r)
     return routes

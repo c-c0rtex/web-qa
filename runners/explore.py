@@ -30,6 +30,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from playwright.sync_api import sync_playwright
 
+from route_mine import as_template, mine_routes
+
 
 def load_project(alias: str) -> dict:
     """Registry entry merged with <project>/.web-qa/config.json (project keys win, None ignored).
@@ -246,17 +248,85 @@ def normalize_for_dedup(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{path}"
 
 
+INTERACTIVE_CLICKS_PER_PAGE = 12
+
+
+def interactive_discover(page, origin: str) -> list[str]:
+    """Opt-in pass for apps with runtime-only navigation: click non-link clickables and
+    harvest pushState URL changes. Mutation safety is enforced at the NETWORK level, not
+    by guessing button semantics from text — every non-GET request is aborted for the
+    duration of the pass, so a "Delete" button physically cannot reach the backend.
+    Known limits (documented in SKILL.md): the valve covers what Chromium routes through
+    request interception — WebSocket frames on already-open connections bypass it, and a
+    GET with server-side side effects (an anti-pattern, but real) is let through."""
+    discovered: list[str] = []
+    base_url = page.url
+
+    def guard(route):
+        if route.request.method in ("GET", "HEAD", "OPTIONS"):
+            route.continue_()
+        else:
+            route.abort()
+
+    def on_dialog(dialog):
+        dialog.dismiss()
+
+    page.route("**/*", guard)
+    page.on("dialog", on_dialog)
+    try:
+        sel = "button, [role=button], [role=tab], [role=menuitem]"
+        count = min(page.locator(sel).count(), INTERACTIVE_CLICKS_PER_PAGE)
+        for i in range(count):
+            try:
+                page.locator(sel).nth(i).click(timeout=1500)
+                page.wait_for_timeout(400)
+            except Exception:
+                continue
+            if page.url == base_url:
+                continue
+            t = urlparse(page.url)
+            if f"{t.scheme}://{t.netloc}" == origin and page.url not in discovered:
+                discovered.append(page.url)
+            try:
+                page.go_back(wait_until="domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            if page.url != base_url:
+                page.goto(base_url, wait_until="domcontentloaded", timeout=10000)
+    finally:
+        page.remove_listener("dialog", on_dialog)
+        page.unroute("**/*")
+    return discovered
+
+
 def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
-          per_template: int = 2, vp_entry: dict | None = None) -> list[dict]:
+          per_template: int = 2, vp_entry: dict | None = None,
+          seed_paths: list[str] | None = None, interactive: bool = False) -> list[dict]:
     """BFS over same-origin URLs, return list of page summaries.
     Visits at most `per_template` concrete URLs per normalized route template so
-    entity cards (/orders/1, /orders/2, …) don't eat the whole max_pages budget."""
+    entity cards (/orders/1, /orders/2, …) don't eat the whole max_pages budget.
+    `seed_paths` (statically mined routes) are enqueued up front — they get visited
+    even when no crawled page links to them. `interactive` adds the click pass."""
     parsed = urlparse(target_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     visited: set[str] = set()
     template_counts: dict[str, int] = {}
     queue: deque[str] = deque([target_url])
+    for sp in seed_paths or []:
+        queue.append(origin + sp)
     pages: list[dict] = []
+
+    def try_enqueue(target: str) -> None:
+        t = urlparse(target)
+        if f"{t.scheme}://{t.netloc}" != origin:
+            return
+        tkey = normalize_for_dedup(target)
+        if "{id}" in tkey:
+            if target.split("#")[0] in visited or template_counts.get(tkey, 0) >= per_template:
+                return
+        elif tkey in visited:
+            return
+        queue.append(target)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -303,21 +373,34 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
 
             # Enqueue same-origin internal links
             for link in summary.get("links", []):
-                href = link["href"]
-                target = urljoin(url, href)
-                t = urlparse(target)
-                if f"{t.scheme}://{t.netloc}" != origin:
-                    continue
-                tkey = normalize_for_dedup(target)
-                if "{id}" in tkey:
-                    if target.split("#")[0] in visited or template_counts.get(tkey, 0) >= per_template:
-                        continue
-                elif tkey in visited:
-                    continue
-                queue.append(target)
+                try_enqueue(urljoin(url, link["href"]))
+
+            if interactive:
+                try:
+                    for found in interactive_discover(page, origin):
+                        try_enqueue(found)
+                except Exception as e:
+                    print(f"[explore] interactive pass failed on {url}: {e}", file=sys.stderr)
 
         browser.close()
     return pages
+
+
+def annotate_origins(pages: list[dict], mined: list[dict]) -> list[dict]:
+    """Mark each crawled page with where the route is known from, and append rows for
+    code-declared routes the crawl never reached. Those still belong in the map — and in
+    the coverage denominator: a declared route no link leads to is a finding, not noise."""
+    mined_by_tpl = {as_template(m["path"]): m for m in mined}
+    seen_tpls: set[str] = set()
+    for p in pages:
+        if "path" not in p:
+            continue
+        tpl = as_template(p["path"].split("?")[0])
+        seen_tpls.add(tpl)
+        p["origin"] = "crawl+code" if tpl in mined_by_tpl else "crawl"
+    extra = [{"path": m["path"], "origin": f"code:{m['source']}", "uncrawled": True}
+             for tpl, m in mined_by_tpl.items() if tpl not in seen_tpls]
+    return pages + sorted(extra, key=lambda e: e["path"])
 
 
 def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: dict) -> str:
@@ -333,11 +416,15 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
 
     # ===== Routes =====
     lines.append("## Routes (frontend)\n")
-    lines.append("| Path | Title | h1/h2 | Forms | Tables | Buttons |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| Path | Title | h1/h2 | Forms | Tables | Buttons | Origin |")
+    lines.append("|---|---|---|---|---|---|---|")
     for p in pages:
         if "error" in p and "url" in p:
-            lines.append(f"| {urlparse(p['url']).path} | _error_ | {p['error'][:60]} | — | — | — |")
+            lines.append(f"| {urlparse(p['url']).path} | _error_ | {p['error'][:60]} | — | — | — | crawl |")
+            continue
+        if p.get("uncrawled"):
+            lines.append(f"| `{p['path']}` | — | _declared in code, not reached by crawl_ "
+                         f"| — | — | — | {p['origin']} |")
             continue
         path = p.get("path", "")
         title = (p.get("title") or "").replace("|", "\\|")[:60]
@@ -345,7 +432,8 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
         forms_count = len(p.get("forms", []))
         tables_count = len(p.get("tables", []))
         btns = len(p.get("buttons", []))
-        lines.append(f"| `{path}` | {title} | {head} | {forms_count} | {tables_count} | {btns} |")
+        lines.append(f"| `{path}` | {title} | {head} | {forms_count} | {tables_count} | {btns} "
+                     f"| {p.get('origin', 'crawl')} |")
     lines.append("")
 
     # ===== Forms =====
@@ -466,6 +554,11 @@ def main() -> int:
     ap.add_argument("--max-pages", type=int, default=30)
     ap.add_argument("--viewport", help="named viewport from config `viewports` "
                                        "(non-default writes app.context.<name>.md)")
+    ap.add_argument("--interactive", action="store_true",
+                    help="click pass for runtime-only navigation (pushState routes without "
+                         "<a href>); non-GET requests are aborted during the pass")
+    ap.add_argument("--no-mine", action="store_true",
+                    help="skip static route mining from the project source")
     args = ap.parse_args()
 
     proj = load_project(args.alias)
@@ -484,9 +577,23 @@ def main() -> int:
     suffix = viewport_suffix(proj, args.viewport)
     label = entry.get("device") or (f"{entry.get('width', DEFAULT_VIEWPORT['width'])}"
                                     f"x{entry.get('height', DEFAULT_VIEWPORT['height'])}")
-    print(f"[explore] crawling {target} (max_pages={args.max_pages}, viewport={label})", file=sys.stderr)
-    pages = crawl(target, storage, max_pages=args.max_pages, vp_entry=entry)
-    print(f"[explore] crawled {len(pages)} pages", file=sys.stderr)
+    mined: list[dict] = []
+    if not args.no_mine:
+        mined = mine_routes(Path(proj["path"]), proj.get("frontend_dir"))
+        if mined:
+            print(f"[explore] mined {len(mined)} route(s) from source "
+                  f"({', '.join(sorted({m['source'] for m in mined}))})", file=sys.stderr)
+    # concrete mined routes seed the queue; parametrized ones can't be built into a URL
+    # without ids, but still land in the map (and the coverage denominator) via annotate
+    seeds = [m["path"] for m in mined if "{" not in m["path"]]
+
+    print(f"[explore] crawling {target} (max_pages={args.max_pages}, viewport={label}"
+          f"{', interactive' if args.interactive else ''})", file=sys.stderr)
+    pages = crawl(target, storage, max_pages=args.max_pages, vp_entry=entry,
+                  seed_paths=seeds, interactive=args.interactive)
+    crawled_count = len(pages)
+    print(f"[explore] crawled {crawled_count} pages", file=sys.stderr)
+    pages = annotate_origins(pages, mined)
 
     md = render_context_md(proj, pages, openapi, user_me)
     if suffix:
@@ -495,7 +602,9 @@ def main() -> int:
     out = Path(proj["path"]) / ".web-qa" / out_name
     existing = out.read_text() if out.is_file() else None
     out.write_text(merge_manual_section(md, existing))
-    print(json.dumps({"alias": args.alias, "pages_crawled": len(pages), "out": str(out), "size": out.stat().st_size}, ensure_ascii=False))
+    print(json.dumps({"alias": args.alias, "pages_crawled": crawled_count,
+                      "routes_mined": len(mined), "out": str(out),
+                      "size": out.stat().st_size}, ensure_ascii=False))
     return 0
 
 

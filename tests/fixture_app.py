@@ -7,6 +7,9 @@ Endpoints:
   POST /toggle-broken→ flips a layout banner on / (visual-regression fixture)
   GET  /             → dashboard (h1, nav, data-testid button, a DELIBERATE a11y violation)
   GET  /items        → table + form
+  GET  /spa          → client-side navigation only: a pushState button (no <a href>) and a
+                       "dangerous" button that fires POST /toggle-broken (interactive-pass fixture)
+  GET  /spa/hidden   → the pushState target
 
 Run standalone: python tests/fixture_app.py [port]
 """
@@ -26,13 +29,33 @@ INDEX_HTML = """<!doctype html><html lang="en"><head><title>Fixture</title></hea
 <body>
 <header><h1>Dashboard</h1></header>
 {banner}
-<nav aria-label="Main"><a href="/items">Items</a></nav>
+<nav aria-label="Main"><a href="/items">Items</a> <a href="/spa">SPA</a></nav>
 <main>
   <p>Welcome to the fixture dashboard with three widgets.</p>
   <button data-testid="refresh-btn">Refresh data</button>
   <img src="logo.png">  <!-- deliberate a11y violation: missing alt -->
 </main>
 </body></html>"""
+
+SPA_HTML = """<!doctype html><html lang="en"><head><title>SPA</title></head>
+<body>
+<h1>SPA area</h1>
+<main id="view">Client-routed area. No links here — buttons only.</main>
+<button id="nav-hidden">Open hidden section</button>
+<button id="danger">Wipe everything</button>
+<script>
+  document.getElementById('nav-hidden').addEventListener('click', () => {
+    history.pushState({}, '', '/spa/hidden');
+    document.getElementById('view').textContent = 'Hidden section (client-rendered)';
+  });
+  document.getElementById('danger').addEventListener('click', () => {
+    fetch('/toggle-broken', {method: 'POST'});
+  });
+</script>
+</body></html>"""
+
+SPA_HIDDEN_HTML = """<!doctype html><html lang="en"><head><title>Hidden</title></head>
+<body><h1>Hidden section</h1><p>Reachable only via client-side navigation.</p></body></html>"""
 
 ITEMS_HTML = """<!doctype html><html lang="en"><head><title>Items</title></head>
 <body>
@@ -111,6 +134,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(OPENAPI)
         elif path == "/items":
             self._html(ITEMS_HTML)
+        elif path == "/spa":
+            self._html(SPA_HTML)
+        elif path == "/spa/hidden":
+            self._html(SPA_HIDDEN_HTML)
         elif path == "/":
             banner = ('<div role="alert" style="background:#000;color:#fff;height:200px">'
                       'LAYOUT BROKEN BANNER</div>') if type(self).broken else ""
