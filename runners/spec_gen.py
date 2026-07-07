@@ -53,6 +53,7 @@ PROJECT CONTEXT:
 
 APP MAP (auto-crawled; REAL routes, form fields, button labels and table headers — trust it over guesses):
 {app_context}
+{dnd_section}
 
 TASK: Generate ONE Playwright spec file (TypeScript) for the test case below. Output ONLY raw .spec.ts code (no markdown fences, no commentary). The file will be saved verbatim and compiled by tsc.
 
@@ -122,6 +123,100 @@ are. Output the FULL corrected .spec.ts (just the code, no fences):
 def slugify(s: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9-]+", "-", s).strip("-").lower()
     return s[:60] or "tc"
+
+
+# --- drag-and-drop interaction recipes --------------------------------------------
+# There is no universal "drag": HTML5 native DnD fires drag/drop events, while JS libs
+# (dnd-kit, react-beautiful-dnd, SortableJS, interact.js) are pointer/mouse driven and
+# need intermediate moves that cross an activation threshold — a single high-level
+# dragAndDrop often silently no-ops on them. So we detect the library from the app's
+# deps and hand the generator the exact, proven sequence for it.
+
+DND_DEPS = {
+    "@dnd-kit/core": "dnd-kit", "@dnd-kit/sortable": "dnd-kit",
+    "react-beautiful-dnd": "react-beautiful-dnd", "@hello-pangea/dnd": "react-beautiful-dnd",
+    "react-dnd": "react-dnd", "sortablejs": "sortablejs", "vuedraggable": "sortablejs",
+    "interactjs": "interact.js", "react-draggable": "pointer", "@shopify/draggable": "pointer",
+}
+
+# Pointer-based helper: down on source, a small move to trip the sensor's activation
+# distance, travel to target in steps, settle, up. Works for dnd-kit / rbd / SortableJS /
+# interact.js and any custom pointer DnD.
+_POINTER_HELPER = """async function dragTo(page, source, target) {
+  const s = (await source.boundingBox())!;
+  const t = (await target.boundingBox())!;
+  const sx = s.x + s.width / 2, sy = s.y + s.height / 2;
+  const tx = t.x + t.width / 2, ty = t.y + t.height / 2;
+  await page.mouse.move(sx, sy);
+  await page.mouse.down();
+  await page.mouse.move(sx + 8, sy + 8, { steps: 5 });   // cross the sensor activation threshold
+  await page.mouse.move(tx, ty, { steps: 12 });          // travel to the drop target
+  await page.mouse.move(tx, ty, { steps: 3 });           // settle so the drop registers
+  await page.mouse.up();
+}"""
+
+_NATIVE_HELPER = """// Native HTML5 drag-and-drop (elements with draggable="true"): Playwright's
+// high-level dragTo drives the dragstart/dragover/drop events for you.
+async function dragTo(page, source, target) {
+  await source.dragTo(target);
+}"""
+
+
+_DND_SKIP_DIRS = {"node_modules", ".next", ".git", ".venv", "dist", "build", ".turbo", "coverage"}
+
+
+def _dnd_from_pkg(pkg: Path) -> str | None:
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    deps = {**(data.get("dependencies") or {}), **(data.get("devDependencies") or {})}
+    for dep, lib in DND_DEPS.items():
+        if dep in deps:
+            return lib
+    return None
+
+
+def detect_dnd_library(frontend_dir: Path, max_depth: int = 3) -> str | None:
+    """DnD library name from the frontend's package.json deps, or None. Checks the dir
+    itself first, then walks up to `max_depth` levels down (skipping node_modules/.next/…)
+    so a nested `app/frontend/package.json` monorepo layout is still found."""
+    direct = _dnd_from_pkg(frontend_dir / "package.json")
+    if direct:
+        return direct
+    if not frontend_dir.is_dir():
+        return None
+    for pkg in sorted(frontend_dir.rglob("package.json"), key=lambda p: len(p.parts)):
+        if set(pkg.parts) & _DND_SKIP_DIRS:
+            continue
+        if len(pkg.relative_to(frontend_dir).parts) - 1 > max_depth:
+            continue
+        lib = _dnd_from_pkg(pkg)
+        if lib:
+            return lib
+    return None
+
+
+def dnd_recipe_section(lib: str | None) -> str:
+    """Prompt section with the exact drag helper for the detected library. Empty when no
+    DnD library is present (most apps) — keeps the prompt lean."""
+    if not lib:
+        return ""
+    helper = _NATIVE_HELPER if lib == "native" else _POINTER_HELPER
+    return f"""
+DRAG-AND-DROP (this app uses **{lib}**) — if the test case involves dragging, reordering
+or dropping, follow this recipe:
+- Define this helper INSIDE the spec file and use it (do not invent your own drag sequence):
+{helper}
+- Locate the source and drop-target with getByTestId / getByRole from the APP MAP (drag
+  handles and drop zones are marked there when present).
+- Assert the RESULT via the DOM, not visually: the new ORDER of list items
+  (`await expect(list.getByRole('listitem')).toHaveText([...])`) or CONTAINMENT
+  (`await expect(target.getByText('Card A')).toBeVisible()`). Never assert a drag via a
+  screenshot — positions shift and visual diff is noise here.
+- Drag-and-drop is inherently flaky; if the drop doesn't register, add one more
+  `await page.mouse.move(tx, ty, {{ steps: 3 }})` before `mouse.up()`.
+"""
 
 
 def tc_hash(body: str) -> str:
@@ -276,8 +371,10 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     app_context = load_app_context(proj_dir)
     seed = load_seed(proj_dir)
     seed_section = seed_prompt_section(seed)
+    frontend_dir = proj_dir / proj["frontend_dir"] if proj.get("frontend_dir") else proj_dir
+    dnd_section = dnd_recipe_section(detect_dnd_library(frontend_dir))
     # Cache key covers everything that shapes the output: TC body + template + app map + seed + urls
-    env_hash = tc_hash(PROMPT_TEMPLATE + app_context + seed + frontend_url + backend_url)
+    env_hash = tc_hash(PROMPT_TEMPLATE + app_context + seed + frontend_url + backend_url + dnd_section)
 
     md_files = sorted(scenarios_dir.glob("*.md"))
     if not md_files:
@@ -328,6 +425,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 auth_login_hint=auth_login_hint,
                 seed_section=seed_section,
                 app_context=app_context,
+                dnd_section=dnd_section,
                 tc_body=f"## {tc_id} — {tc.get('name', '')}\n\n{tc.get('body', '')}",
             )
             jobs.append((tc_key, prompt, out_path, body_hash, declared[0] if declared else None))

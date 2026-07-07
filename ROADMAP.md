@@ -6,6 +6,27 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.4.0 (signal quality & drag-and-drop)
+
+- **Flake quarantine** — `quarantine_after: N`: a spec that flips pass/fail across the
+  last N matrix runs is auto-quarantined (🚧) — still executed and reported, but kept out
+  of the gate's exit code and emitted as `skipped` in JUnit until it stabilizes. Default
+  off; the data was already in `history.json`
+- **Flake-aware healing (deterministic-first)** — before spending an LLM heal, maintain
+  classifies transients WITHOUT a model: a network/infra/rate-limit signature in the
+  failure (`net::ERR_*`, `ECONNRESET`, 429, 50x, `Target closed`…) is retried, not healed;
+  `--reruns N` additionally re-runs a signature-clean spec and treats a pass as a flake.
+  Only consistently-failing specs reach the healer
+- **Console-error gating** — `console_fail_on: ["error"]` (opt-in) fails a passive TC that
+  throws to the console during its navigation; `console_ignore` regexes drop known noise.
+  Another zero-token oracle signal
+- **Drag-and-drop recipes** — the spec generator detects the app's DnD library from
+  package.json (dnd-kit, react-beautiful-dnd / @hello-pangea, SortableJS, interact.js,
+  native HTML5) and injects the exact, proven `dragTo` helper for it — the multi-step
+  pointer sequence that trips pointer-sensor activation thresholds, where a single
+  high-level `dragAndDrop` silently no-ops. Assertions go through DOM order/containment,
+  not visual diff
+
 ## Shipped — v0.3.6 (plugin distribution)
 
 - **Plugin-cache-safe layout** — `SKILL.md` moved to `skills/web-qa/`, every command
@@ -127,29 +148,60 @@ against a real RealWorld stack:
 
 ## Next
 
-### v0.4 — cross-agent & smarter healing
+Ordered by value-to-effort, not by size of idea. web-qa and tg-qa now share the same
+core (`call_claude`, registry, matrix, maintain), so the cross-cutting items below —
+cross-agent, quarantine, flake-aware healing — are meant to be designed **once in the
+shared layer** and land in both skills, not reimplemented twice.
 
-- [ ] **Cross-agent support** — decouple generation from the `claude -p` binary behind a
-  configurable command (`WEBQA_LLM_CMD`), so the same skill runs under Codex CLI, Gemini CLI,
-  Kimi Code CLI. The deterministic run phase is already agent-agnostic. Ships with a
-  compatibility matrix and installs under the shared `.agents/skills/` path
-- [ ] **Healing v2** — flake-aware: tell transient failures (network timeouts, rate limits,
-  races) apart from real regressions — retry the former, heal the latter. (The other half —
-  `error-context.md` ARIA snapshots in the healing prompt — shipped in v0.3.5)
-- [ ] **Parallel passive stage** — run passive TCs across multiple pages; needs care on
-  small dev stands where parallel browsers turn timing into flaky noise (`workers: 1` exists
-  for a reason)
+### v0.5 — cross-agent (portability)
+
+- [ ] **Cross-agent support (MVP first)** — decouple generation from the `claude -p`
+  binary behind a configurable command (`WEBQA_LLM_CMD`), extending the run phase's
+  agent-agnosticism to generation. The hard part isn't the env var — it's normalizing
+  output framing, flags and timeouts across CLIs. So the MVP is the command indirection +
+  **one** proven alternate CLI (Codex); the full compatibility matrix (Gemini, Kimi, …)
+  and the shared `.agents/skills/` install path grow from there rather than gating the
+  release. Biggest single adoption lever, so it gets its own release
+
+### v0.6+ — demand-gated
+
+Real designs, but they solve problems that only appear at scale. Sequenced by actual
+demand signal, not the calendar.
+
+- [ ] **Matrix sharding** — `web-qa-matrix --shard i/n` splits the whole inventory
+  (passive TCs + specs) across CI runners and merges the per-shard JUnit into one gate
+  verdict; Playwright's own `--shard` covers only the spec stage, the passive stage needs
+  its own split. For suites a single-runner gate has outgrown
+- [ ] **Parallel passive stage** — run passive TCs across multiple pages, behind explicit
+  opt-in + per-stand concurrency detection. Small dev stands turn parallel browsers into
+  flaky noise (`workers: 1` exists for a reason), so this waits until quarantine +
+  flake-aware healing are in to absorb the risk it adds
+- [ ] **Incremental re-explore** — `web-qa-explore --diff <ref>` re-crawls only the routes
+  a diff touches (changed frontend files → owning routes via the mining map) and merges
+  them into `app.context.md`. The mapping stays conservative: a shared component/layout
+  change re-crawls dependent routes rather than missing them. Delivers the architecture's
+  "incrementally after" promise
 
 ## Exploring
 
 Directional. Shape may change; not committed.
 
-- Richer assertions beyond DOM / pixel / a11y / network — console-error gating,
-  performance budgets
-- API testing from OpenAPI — a deterministic contract layer (schemathesis integration,
-  zero tokens) + LLM-generated API flow scenarios (`web-qa-generate --api`), endpoint
-  coverage in the matrix
-- Single-file HTML report with diff artifacts inline `help wanted`
+- **OAuth / SSO login flows** — segment-gated, but the real gate between "works on demo
+  apps" and "works on my company's app": the config auth adapter plants a token from a
+  direct login endpoint; third-party IdP redirects (OAuth authorization-code, SAML) still
+  need a scripted consent pass, driven once and cached into `storageState`
+- **Per-locale runs** — locale as a matrix dimension (like roles / viewports —
+  architecturally cheap since the dimension machinery exists), with per-locale visual
+  baselines for i18n layout regressions
+- **Performance budgets** — a timing/resource oracle alongside the console-error gating above
+- **Single-file HTML report** with diff artifacts inline `help wanted`
+
+## Elsewhere, not here
+
+- **API testing from OpenAPI** — a deterministic contract layer (schemathesis, zero
+  tokens) + LLM-generated API flow scenarios is a different surface with a different
+  oracle. It belongs in a dedicated **api-qa** skill (already anticipated in the
+  `c-c0rtex` marketplace), not bolted onto web-qa
 
 ## Out of scope (for now)
 

@@ -270,9 +270,24 @@ def row_key(r: dict) -> str:
     return f"{r['source']}:{r['file']}:{r['id']}:{r.get('role', '-')}:{r.get('viewport', '-')}"
 
 
-def update_history(webqa: Path, run_id: str, rows: list[dict]) -> set[str]:
-    """Append this run to .web-qa/history.json (last HISTORY_KEEP runs kept).
-    Returns row keys that both passed and failed within the last FLAKY_WINDOW runs."""
+def _flipped(window: list[dict], rows: list[dict]) -> set[str]:
+    """Row keys that BOTH passed and failed within the given history window — the
+    definition of unstable, shared by flaky reporting and quarantine."""
+    out: set[str] = set()
+    for r in rows:
+        k = row_key(r)
+        sts = [h["statuses"].get(k) for h in window if k in h.get("statuses", {})]
+        if "pass" in sts and any(s in ("fail", "error") for s in sts):
+            out.add(k)
+    return out
+
+
+def update_history(webqa: Path, run_id: str, rows: list[dict],
+                   quarantine_window: int = 0) -> tuple[set[str], set[str]]:
+    """Append this run to .web-qa/history.json (last HISTORY_KEEP runs kept). Returns
+    (flaky_keys, quarantined_keys): flaky = flipped over the last FLAKY_WINDOW runs
+    (reported with 🔁); quarantined = flipped over the last `quarantine_window` runs
+    (0 = off) — those are kept out of the gate's exit code until they stabilize."""
     hist_path = webqa / "history.json"
     try:
         history = json.loads(hist_path.read_text()) if hist_path.is_file() else []
@@ -285,21 +300,19 @@ def update_history(webqa: Path, run_id: str, rows: list[dict]) -> set[str]:
     history.append({"run_id": run_id, "statuses": {row_key(r): r["status"] for r in rows}})
     history = history[-HISTORY_KEEP:]
     hist_path.write_text(json.dumps(history, ensure_ascii=False))
-    flaky: set[str] = set()
-    recent = history[-FLAKY_WINDOW:]
-    for r in rows:
-        k = row_key(r)
-        sts = [h["statuses"].get(k) for h in recent if k in h.get("statuses", {})]
-        if "pass" in sts and any(s in ("fail", "error") for s in sts):
-            flaky.add(k)
-    return flaky
+    flaky = _flipped(history[-FLAKY_WINDOW:], rows)
+    quarantined = _flipped(history[-quarantine_window:], rows) if quarantine_window else set()
+    return flaky, quarantined
 
 
 # ---------- report ----------
 
-def render_junit_xml(alias: str, run_id: str, rows: list[dict]) -> str:
+def render_junit_xml(alias: str, run_id: str, rows: list[dict],
+                     quarantined: set[str] = frozenset()) -> str:
     """Matrix rows as JUnit XML — the lingua franca of CI test reporting. One testcase
-    per row; fail/error → <failure>, manual/skip/not-run → <skipped>."""
+    per row; fail/error → <failure>, manual/skip/not-run → <skipped>. A quarantined
+    failure is emitted as <skipped> so CI aggregators don't block on it — same rule as
+    the gate exit code."""
     from xml.sax.saxutils import escape, quoteattr
     cases: list[str] = []
     failures = skipped = 0
@@ -307,7 +320,10 @@ def render_junit_xml(alias: str, run_id: str, rows: list[dict]) -> str:
         bits = [r.get("file") or "", r.get("id") or "", r.get("role") or "", r.get("viewport") or ""]
         name = quoteattr("::".join(b for b in bits if b and b != "-"))
         status, note = r.get("status", "not-run"), escape(r.get("note") or "")
-        if status in ("fail", "error"):
+        if status in ("fail", "error") and quarantined and row_key(r) in quarantined:
+            skipped += 1
+            cases.append(f"    <testcase name={name}><skipped message=\"quarantined ({status})\"/></testcase>")
+        elif status in ("fail", "error"):
             failures += 1
             cases.append(f"    <testcase name={name}><failure message=\"{status}\">{note}</failure></testcase>")
         elif status == "pass":
@@ -329,7 +345,8 @@ GATE_BLOCKING = ("fail", "error")
 
 def render_matrix_md(alias: str, run_id: str, rows: list[dict], stats: dict, gate_ok: bool,
                      coverage: dict, flaky_keys: set[str],
-                     role_coverage: dict | None = None) -> str:
+                     role_coverage: dict | None = None,
+                     quarantined: set[str] = frozenset()) -> str:
     lines = [
         f"# Test Matrix — {alias}",
         f"\n_Run: {run_id} UTC_",
@@ -340,6 +357,11 @@ def render_matrix_md(alias: str, run_id: str, rows: list[dict], stats: dict, gat
         lines.append(f"- {STATUS_EMOJI.get(st, '?')} {st}: {n}")
     if flaky_keys:
         lines.append(f"- 🔁 flaky (unstable over last {FLAKY_WINDOW} runs): {len(flaky_keys)}")
+    if quarantined:
+        q_blocking = sum(1 for r in rows
+                         if r["status"] in GATE_BLOCKING and row_key(r) in quarantined)
+        lines.append(f"- 🚧 quarantined (excluded from the gate until stable): "
+                     f"{len(quarantined)}" + (f", masking {q_blocking} failing" if q_blocking else ""))
     if coverage.get("routes_total"):
         lines.append(f"\n**Route coverage:** {coverage['covered']}/{coverage['routes_total']} routes have tests")
         if coverage["uncovered"]:
@@ -354,9 +376,9 @@ def render_matrix_md(alias: str, run_id: str, rows: list[dict], stats: dict, gat
     for i, r in enumerate(rows, 1):
         note = (r.get("note", "") or "").replace("|", "\\|")[:120]
         emoji = STATUS_EMOJI.get(r["status"], "?")
-        flaky_mark = " 🔁" if row_key(r) in flaky_keys else ""
+        mark = (" 🔁" if row_key(r) in flaky_keys else "") + (" 🚧" if row_key(r) in quarantined else "")
         lines.append(f"| {i} | {r['source']} | {r['file']} | {r['id']} | {r.get('role', '-')} "
-                     f"| {r.get('viewport', '-')} | {r['kind']} | {emoji} {r['status']}{flaky_mark} | {note} |")
+                     f"| {r.get('viewport', '-')} | {r['kind']} | {emoji} {r['status']}{mark} | {note} |")
     return "\n".join(lines) + "\n"
 
 
@@ -442,19 +464,22 @@ def main() -> int:
     matrix_md = run_dir / "matrix.md"
     passive_reports: list[str] = []
 
-    def snapshot(stage: str, flaky_keys: set[str] = frozenset()) -> tuple[dict, bool]:
+    def snapshot(stage: str, flaky_keys: set[str] = frozenset(),
+                 quarantined: set[str] = frozenset()) -> tuple[dict, bool]:
         """Persist matrix.md/json NOW. Called before and after every stage so a killed
-        or hung run still leaves a durable partial report on disk."""
+        or hung run still leaves a durable partial report on disk. Quarantined rows still
+        run and report, but their fail/error does not block the gate."""
         stats: dict[str, int] = {}
         for r in rows:
             stats[r["status"]] = stats.get(r["status"], 0) + 1
-        gate_ok = not any(r["status"] in GATE_BLOCKING for r in rows)
+        gate_ok = not any(r["status"] in GATE_BLOCKING and row_key(r) not in quarantined
+                          for r in rows)
         matrix_md.write_text(render_matrix_md(proj["alias"], run_id, rows, stats, gate_ok,
-                                              coverage, flaky_keys, role_coverage))
+                                              coverage, flaky_keys, role_coverage, quarantined))
         (run_dir / "matrix.json").write_text(json.dumps({
             "run_id": run_id, "alias": proj["alias"], "stage": stage, "gate_ok": gate_ok,
             "stats": stats, "coverage": coverage, "role_coverage": role_coverage,
-            "flaky": sorted(flaky_keys),
+            "flaky": sorted(flaky_keys), "quarantined": sorted(quarantined),
             "gate_excluded": gate_excluded,
             "roles": [r or "default" for r in roles],
             "viewports": [v or "default" for v in viewports],
@@ -479,13 +504,14 @@ def main() -> int:
                         viewport_env(proj), mobile_device)
         snapshot("specs")
 
-    flaky_keys = update_history(webqa, run_id, rows)
-    stats, gate_ok = snapshot("final", flaky_keys)
+    q_window = int(proj.get("quarantine_after") or 0)
+    flaky_keys, quarantined = update_history(webqa, run_id, rows, q_window)
+    stats, gate_ok = snapshot("final", flaky_keys, quarantined)
 
     if args.junit:
         junit_path = Path(args.junit)
         junit_path.parent.mkdir(parents=True, exist_ok=True)
-        junit_path.write_text(render_junit_xml(proj["alias"], run_id, rows))
+        junit_path.write_text(render_junit_xml(proj["alias"], run_id, rows, quarantined))
         print(f"[matrix] junit → {junit_path}", file=sys.stderr)
 
     # Zero-config CI summary: inside GitHub Actions the matrix lands on the run page

@@ -25,18 +25,32 @@ from matrix import (
     rows_for_role,
     update_history,
 )
-from maintain import classify_heal_output, failing_specs_from_report, record_app_bug
+from maintain import (
+    classify_heal_output,
+    failing_specs_from_report,
+    record_app_bug,
+    transient_signature,
+)
 from run_scenarios import (
     classify,
     declared_type,
     extract_paths,
+    gated_console,
     infer_root_path,
     materialize_path,
     split_tcs,
     tc_roles,
     visual_diff_pct,
 )
-from spec_gen import PROMPT_TEMPLATE, is_mutating, load_seed, postprocess_spec, slugify
+from spec_gen import (
+    PROMPT_TEMPLATE,
+    detect_dnd_library,
+    dnd_recipe_section,
+    is_mutating,
+    load_seed,
+    postprocess_spec,
+    slugify,
+)
 
 
 # ---------- explore ----------
@@ -582,9 +596,46 @@ def test_prompt_format_survives_braces_in_values():
         test_data_prefix="QA-",
         auth_login_hint="use `Bearer ${access_token}` and {email, password}",
         seed_section="```ts\nconst t = `x${y}`;\n```",
-        app_context="ctx", tc_body="## TC-1 — t",
+        app_context="ctx", dnd_section="", tc_body="## TC-1 — t",
     )
     assert "Bearer ${access_token}" in p and "{email, password}" in p
+
+
+def test_detect_dnd_library(tmp_path):
+    (tmp_path / "package.json").write_text(json.dumps(
+        {"dependencies": {"@dnd-kit/core": "^6", "react": "18"}}))
+    assert detect_dnd_library(tmp_path) == "dnd-kit"
+
+
+def test_detect_dnd_library_monorepo_subdir(tmp_path):
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend" / "package.json").write_text(json.dumps(
+        {"devDependencies": {"react-beautiful-dnd": "^13"}}))
+    assert detect_dnd_library(tmp_path) == "react-beautiful-dnd"
+
+
+def test_detect_dnd_library_none(tmp_path):
+    (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"react": "18"}}))
+    assert detect_dnd_library(tmp_path) is None
+    assert detect_dnd_library(tmp_path / "nope") is None
+
+
+def test_dnd_recipe_section_empty_without_lib():
+    assert dnd_recipe_section(None) == ""
+
+
+def test_dnd_recipe_section_pointer_helper():
+    sec = dnd_recipe_section("dnd-kit")
+    assert "dnd-kit" in sec
+    assert "async function dragTo" in sec and "mouse.down()" in sec
+    assert "activation threshold" in sec
+    assert "toHaveText" in sec                 # assert via DOM order, not visual
+    assert "{ steps: 3 }" in sec               # literal braces survive
+
+
+def test_dnd_recipe_section_native():
+    sec = dnd_recipe_section("native")
+    assert "source.dragTo(target)" in sec
 
 
 def test_slugify():
@@ -657,9 +708,46 @@ def test_history_flags_flaky(tmp_path):
            "status": "pass", "kind": "passive", "title": "t"}
     for status in ("pass", "fail", "pass"):
         row["status"] = status
-        flaky = update_history(d, f"run-{status}", [row])
+        flaky, _q = update_history(d, f"run-{status}", [row])
     assert row_key(row) in flaky
     assert len(json.loads((d / "history.json").read_text())) == 3
+
+
+def test_quarantine_off_by_default(tmp_path):
+    d = _webqa(tmp_path)
+    row = {"source": "scenario", "file": "f.md", "id": "TC-1", "role": "-",
+           "status": "pass", "kind": "passive", "title": "t"}
+    for status in ("pass", "fail"):
+        row["status"] = status
+        _f, q = update_history(d, f"run-{status}", [row])   # quarantine_window=0
+    assert q == set()
+
+
+def test_quarantine_flags_flipped_within_window(tmp_path):
+    d = _webqa(tmp_path)
+    row = {"source": "scenario", "file": "f.md", "id": "TC-1", "role": "-",
+           "status": "pass", "kind": "passive", "title": "t"}
+    quarantined = set()
+    for status in ("pass", "fail", "fail"):
+        row["status"] = status
+        _f, quarantined = update_history(d, f"run-{status}", [row], quarantine_window=3)
+    assert row_key(row) in quarantined   # flipped pass↔fail within last 3 runs
+
+
+def test_quarantined_failure_excluded_from_gate_and_junit():
+    from matrix import GATE_BLOCKING, render_junit_xml, row_key
+    import xml.etree.ElementTree as ET
+    row = {"source": "spec", "file": "a.spec.ts", "id": "-", "role": "-", "viewport": "-",
+           "status": "fail", "kind": "spec", "title": "t", "note": "racy"}
+    q = {row_key(row)}
+    # gate: a quarantined failing row does not block
+    gate_ok = not any(r["status"] in GATE_BLOCKING and row_key(r) not in q for r in [row])
+    assert gate_ok is True
+    # junit: quarantined failure emitted as skipped, not failure
+    root = ET.fromstring(render_junit_xml("demo", "run-1", [row], q))
+    suite = root.find("testsuite")
+    assert suite.get("failures") == "0" and suite.get("skipped") == "1"
+    assert "quarantined" in root.find(".//skipped").get("message")
 
 
 # ---------- gen_scenarios ----------
@@ -746,7 +834,7 @@ def test_history_migrates_legacy_keys(tmp_path):
         [{"run_id": "old", "statuses": {"scenario:f.md:TC-1:-": "fail"}}]))
     row = {"source": "scenario", "file": "f.md", "id": "TC-1", "role": "-", "viewport": "-",
            "status": "pass", "kind": "passive", "title": "t"}
-    flaky = update_history(d, "new", [row])
+    flaky, _q = update_history(d, "new", [row])
     assert row_key(row) in flaky  # old fail + new pass across formats = flaky
 
 
@@ -762,3 +850,48 @@ def test_record_app_bug_dedupes(tmp_path):
     record_app_bug(tmp_path, "a.spec.ts", "same bug")
     text = (tmp_path / ".web-qa" / "BUGS.md").read_text()
     assert text.count("same bug") == 1
+
+
+def test_transient_signature_matches_network_and_infra():
+    assert transient_signature(["page.goto: net::ERR_CONNECTION_REFUSED at http://x"])
+    assert transient_signature(["Error: connect ECONNRESET 127.0.0.1:3000"])
+    assert transient_signature(["Request failed with status 503 Service Unavailable"])
+    assert transient_signature(["POST /api returned 429 Too Many Requests"])
+    assert transient_signature(["Target page, context or browser has been closed"])
+    assert "ECONNREFUSED" in transient_signature(["boom ECONNREFUSED boom"])
+
+
+def test_transient_signature_ignores_real_failures():
+    # a genuine assertion / missing-element failure has none of the infra strings
+    assert transient_signature([
+        "expect(locator).toBeVisible() failed: Timeout 30000ms exceeded "
+        "waiting for getByRole('button', { name: 'Publish' })"]) is None
+    assert transient_signature(["Expected 'Welcome' but received 'Goodbye'"]) is None
+    assert transient_signature([]) is None
+
+
+CONSOLE = [
+    {"type": "error", "text": "Uncaught TypeError: x is undefined"},
+    {"type": "warning", "text": "deprecated API"},
+    {"type": "log", "text": "hello"},
+    {"type": "error", "text": "Failed to load resource: the server responded 404 (favicon.ico)"},
+]
+
+
+def test_gated_console_off_by_default():
+    assert gated_console(CONSOLE, [], []) == []          # opt-in: empty fail_on = off
+
+
+def test_gated_console_matches_type():
+    bad = gated_console(CONSOLE, ["error"], [])
+    assert [c["type"] for c in bad] == ["error", "error"]
+
+
+def test_gated_console_ignore_regex():
+    bad = gated_console(CONSOLE, ["error"], [r"favicon\.ico", r"ResizeObserver"])
+    assert len(bad) == 1 and "TypeError" in bad[0]["text"]
+
+
+def test_gated_console_multiple_types():
+    bad = gated_console(CONSOLE, ["error", "warning"], [])
+    assert len(bad) == 3

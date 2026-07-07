@@ -161,6 +161,85 @@ def classify_heal_output(code: str) -> tuple[str, str]:
     return "fix", ""
 
 
+# Deterministic transient signatures: network / infra / rate-limit / gateway strings that
+# mean "the environment hiccuped", NOT "the app is broken". Curated to be SAFE — a real
+# assertion or missing-element failure never contains these, so matching one can't mask a
+# genuine regression. Generic locator timeouts are deliberately absent (they usually ARE
+# real: the element is gone).
+TRANSIENT_SIGNATURES = [
+    r"net::ERR_[A-Z_]+", r"ERR_CONNECTION[A-Z_]*", r"ERR_NETWORK[A-Z_]*",
+    r"ECONNRESET", r"ECONNREFUSED", r"ETIMEDOUT", r"EAI_AGAIN", r"ENOTFOUND",
+    r"socket hang up", r"getaddrinfo", r"read ECONN",
+    r"\b429\b", r"Too Many Requests", r"rate.?limit",
+    r"\b50[234]\b", r"Bad Gateway", r"Service Unavailable", r"Gateway Time-?out",
+    r"Target (?:page, context or browser has been )?closed",
+    r"Execution context was destroyed", r"frame (?:was )?detached",
+    r"Protocol error \(", r"WebSocket .*closed",
+]
+RE_TRANSIENT_SIG = re.compile("|".join(TRANSIENT_SIGNATURES), re.IGNORECASE)
+
+
+def transient_signature(errors: list[str]) -> str | None:
+    """The matched network/infra/rate-limit signature in the failure output, or None.
+    Deterministic and cheap — runs BEFORE the LLM so an env hiccup is retried, not healed."""
+    m = RE_TRANSIENT_SIG.search("\n".join(errors))
+    return m.group(0) if m else None
+
+
+def rerun_is_flaky(webqa: Path, spec_name: str, times: int, workers: int | None,
+                   viewport: str | None) -> bool:
+    """Re-run ONE failing spec `times` times; True if it passed at least once — i.e. the
+    failure is non-deterministic (flake), so it should be retried, not healed. False if it
+    failed every rerun (a consistent, real failure). Reproducibility as the oracle, no LLM."""
+    if times < 1:
+        return False
+    out_json = webqa / "reports" / f"rerun-{Path(spec_name).stem}.json"
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=str(out_json))
+    if viewport:
+        env["WEBQA_VIEWPORT"] = viewport
+    cmd = ["npx", "playwright", "test", f"specs/{spec_name}", "--reporter=json",
+           f"--repeat-each={times}", f"--workers={workers or 1}"]
+    proc = subprocess.Popen(cmd, cwd=webqa, env=env, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        proc.wait(timeout=900)
+    except subprocess.TimeoutExpired:
+        import signal
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        return False
+    if not out_json.is_file():
+        return False
+    try:
+        report = json.loads(out_json.read_text())
+    except json.JSONDecodeError:
+        return False
+    # passed at least once across the repeats → non-deterministic → flake
+    return _spec_passed_any(report)
+
+
+def _spec_passed_any(report: dict) -> bool:
+    seen_pass = False
+
+    def walk(suite: dict) -> None:
+        nonlocal seen_pass
+        for sub in suite.get("suites", []):
+            walk(sub)
+        for spec in suite.get("specs", []):
+            for t in spec.get("tests", []):
+                for res in t.get("results", []):
+                    if res.get("status") in ("passed", "expected"):
+                        seen_pass = True
+
+    for s in report.get("suites", []):
+        walk(s)
+    return seen_pass
+
+
 def record_app_bug(proj_dir: Path, spec_name: str, description: str) -> None:
     """Append a healer-confirmed application bug to .web-qa/BUGS.md."""
     bugs = proj_dir / ".web-qa" / "BUGS.md"
@@ -234,6 +313,9 @@ def main() -> int:
     ap.add_argument("--with-screens", action="store_true",
                     help="list failure screenshot paths in the summary JSON so the "
                          "orchestrating agent can Read them (visual judgment is its job)")
+    ap.add_argument("--reruns", type=int, default=0,
+                    help="before healing, re-run a signature-clean failing spec N times; "
+                         "if it ever passes it's a flake (retry, don't heal). Default 0 (off)")
     args = ap.parse_args()
 
     proj = load_project(args.alias)
@@ -263,9 +345,28 @@ def main() -> int:
                "mode": "apply" if args.apply else "propose"}
     print(f"[maintain] {len(fails)} failing spec(s), {args.workers} workers", file=sys.stderr)
 
+    # Deterministic-first: classify flake/transient WITHOUT the LLM before spending a heal.
+    #  1. a network/infra/rate-limit signature in the failure = env hiccup → transient
+    #  2. --reruns N: a signature-clean spec that passes on re-run = non-deterministic → transient
+    # Only specs that survive both reach the healer.
+    to_heal: dict[str, list[str]] = {}
+    for fname, errors in fails.items():
+        sig = transient_signature(errors)
+        if sig:
+            summary["transient"].append({"spec": fname, "reason": sig, "source": "signature"})
+            print(f"[maintain] TRANSIENT {fname}: signature '{sig}' (spec untouched — rerun)", file=sys.stderr)
+            continue
+        if args.reruns and (specs_dir / fname).is_file() and rerun_is_flaky(
+                webqa, fname, args.reruns, args.pw_workers or proj.get("workers"), viewport_env(proj)):
+            summary["transient"].append({"spec": fname, "reason": f"passed on re-run (×{args.reruns})",
+                                         "source": "rerun"})
+            print(f"[maintain] TRANSIENT {fname}: passed on re-run — flake, not healed", file=sys.stderr)
+            continue
+        to_heal[fname] = errors
+
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
         futures = {}
-        for fname, errors in fails.items():
+        for fname, errors in to_heal.items():
             spec_path = specs_dir / fname
             if not spec_path.is_file():
                 summary["errors"].append({"spec": fname, "error": "spec file not found"})

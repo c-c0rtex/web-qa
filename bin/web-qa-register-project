@@ -64,6 +64,10 @@ CONFIG_SKELETON = {
     "test_data_prefix": None,
     "viewport": None,
     "viewports": None,
+    "network_fail_on": None,
+    "console_fail_on": None,
+    "console_ignore": None,
+    "quarantine_after": None,
 }
 
 

@@ -305,6 +305,17 @@ def visual_diff_pct(baseline_path: Path, current_path: Path) -> float | str | No
         return None
 
 
+def gated_console(entries: list[dict], fail_on: list[str], ignore: list[str]) -> list[dict]:
+    """Console entries (captured this TC) that should FAIL the TC: type in `fail_on`
+    and text not matching any `ignore` regex. Empty `fail_on` = gating off (opt-in)."""
+    if not fail_on:
+        return []
+    pats = [re.compile(p) for p in ignore]
+    return [c for c in entries
+            if c.get("type") in fail_on
+            and not any(p.search(c.get("text", "")) for p in pats)]
+
+
 def save_diff_mask(baseline_path: Path, current_path: Path, out_path: Path) -> bool:
     """Render WHERE the pixels differ (red on white) — reviewing a visual regression means
     Reading baseline, current and this mask side by side, not staring at a percentage."""
@@ -574,6 +585,7 @@ def main() -> int:
                     continue
 
                 nf_start = len(network_fails)
+                console_start = len(console_log)
                 res = run_passive_tc(tc, page, target, backend, cookies, ids, reports,
                                      baseline_dir, args.update_baseline, args.visual_threshold,
                                      backend_prefixes, route_hints, visual_masks, visual_exclude,
@@ -589,6 +601,16 @@ def main() -> int:
                     res["status"] = "fail"
                     res["notes"].append("NETWORK: " + "; ".join(
                         f"{nf['status']} {nf['method']} {nf['url'][:100]}" for nf in bad[:5]))
+                # Console assertion (opt-in): a console message of a gated type during THIS
+                # TC's navigation fails it. Off by default (`console_fail_on` empty) because
+                # real apps are noisy; `console_ignore` regexes drop known third-party noise.
+                bad_console = gated_console(console_log[console_start:],
+                                            proj.get("console_fail_on") or [],
+                                            proj.get("console_ignore") or [])
+                if bad_console and res["status"] == "pass":
+                    res["status"] = "fail"
+                    res["notes"].append("CONSOLE: " + "; ".join(
+                        f"[{c['type']}] {c['text'][:100]}" for c in bad_console[:5]))
                 res["scenario_file"] = sf.name
                 all_results.append(res)
                 print(f"  {res['id']}: {res['status']} ({len(res.get('a11y_critical', []))} a11y critical)", file=sys.stderr)
