@@ -7,6 +7,20 @@ description: Autonomous web app QA — Playwright E2E + visual regression + axe-
 
 Agent skill for testing web applications: E2E + visual regression + a11y + scenario auto-generation. Architecture — a 4-stage sequential pipeline, portable (one skill, many projects).
 
+## Locating the tooling
+
+Every `web-qa-*` command in this skill is a script under the plugin root: run it as
+`${CLAUDE_PLUGIN_ROOT}/bin/web-qa-<name>` (e.g. `${CLAUDE_PLUGIN_ROOT}/bin/web-qa-matrix`).
+When `${CLAUDE_PLUGIN_ROOT}` is unset (classic git-clone install into
+`~/.claude/skills/web-qa`), the repository root — two directory levels above this file —
+takes its place. Never call the bare name and hope it is on PATH.
+
+First run: the bin wrappers are `uv run`-based — [uv](https://docs.astral.sh/uv/) creates
+the venv and installs pinned Python deps automatically on first invocation, no manual
+`uv sync` needed. The only extra install is Playwright's chromium, which is per-project
+(see the specs-runner setup block below); `web-qa-doctor` verifies both and prints the
+fix when something is missing.
+
 ## When to use
 
 - "Run the regression on /cart", "check that checkout works" — execute existing/new scenarios
@@ -64,7 +78,7 @@ Agent skill for testing web applications: E2E + visual regression + a11y + scena
 
 ```
 <skill root>/                             # shared infrastructure
-├── SKILL.md
+├── skills/web-qa/SKILL.md                # this file (plugin skill layout)
 ├── projects.json                         # machine-local registry (gitignored; see projects.example.json)
 ├── playwright.config.template.ts         # per-project config template
 ├── bin/                                  # thin wrappers over runners/ (uv run)
@@ -149,7 +163,7 @@ cd <project>/.web-qa
 npm install -D @playwright/test
 npx playwright install chromium
 grep -q node_modules .gitignore 2>/dev/null || echo 'node_modules/' >> .gitignore
-cp <skill root>/playwright.config.template.ts playwright.config.ts   # adjust baseURL
+cp "${CLAUDE_PLUGIN_ROOT}/playwright.config.template.ts" playwright.config.ts   # adjust baseURL
 ```
 Pin `@playwright/test` to an exact version: every version pins an exact browser build, and an unplanned upgrade means an unplanned browser download.
 
@@ -169,7 +183,7 @@ Pin `@playwright/test` to an exact version: every version pins an exact browser 
 
 ### Pre-deploy gate
 1. Dev servers up → `web-qa-matrix --alias <a>` → exit 0 = deploy, 1 = investigate
-2. In a deploy script: `web-qa-matrix --alias <a> && ./deploy.sh`
+2. In a deploy script: `"${CLAUDE_PLUGIN_ROOT}/bin/web-qa-matrix" --alias <a> && ./deploy.sh`
 3. Convention: `_`-prefixed specs are ad-hoc debug — excluded from the gate; prod-hidden features via `gate_exclude`
 
 ## Screenshots and visual judgment (for the agent)

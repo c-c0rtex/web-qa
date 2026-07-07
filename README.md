@@ -76,7 +76,7 @@ bin/web-qa-register-project my-app --target-url http://127.0.0.1:3000 --backend-
 bin/web-qa-explore --alias my-app          # crawl → <project>/.web-qa/app.context.md
 ```
 
-Set up the per-project specs runner (once — see SKILL.md, "Per-project specs runner setup").
+Set up the per-project specs runner (once — see skills/web-qa/SKILL.md, "Per-project specs runner setup").
 
 ## Talking to your agent
 
@@ -95,7 +95,7 @@ web-qa is a skill: normally you don't type the CLI yourself — you ask your cod
 | *"The redesign is intentional — update the baselines"* | reviews the baseline/current/diff triple, then `run --update-baseline --routes '<route>'` per accepted change |
 | *"Show me how /orders looks right now"* | takes a screenshot, reads it, describes what it sees |
 
-The agent-facing contract (which command for which intent, business rules, config keys) lives in [SKILL.md](SKILL.md) — that's what your agent reads when the skill activates.
+The agent-facing contract (which command for which intent, business rules, config keys) lives in [SKILL.md](skills/web-qa/SKILL.md) — that's what your agent reads when the skill activates.
 
 ## Everyday use (CLI)
 
@@ -117,7 +117,7 @@ All long runs are durable: the matrix report is rewritten after every stage, Pla
 
 ## Configuration
 
-Machine-local registry `projects.json` (aliases, URLs, credentials — never committed) + per-project `.web-qa/config.json` (stack description, auth flow hint for generation, visual masks/excludes, deploy-gate excludes, test-data prefix…). Both documented in [SKILL.md](SKILL.md), examples in [projects.example.json](projects.example.json) and [config.example.json](config.example.json).
+Machine-local registry `projects.json` (aliases, URLs, credentials — never committed) + per-project `.web-qa/config.json` (stack description, auth flow hint for generation, visual masks/excludes, deploy-gate excludes, test-data prefix…). Both documented in [SKILL.md](skills/web-qa/SKILL.md), examples in [projects.example.json](projects.example.json) and [config.example.json](config.example.json).
 
 Useful environment variables:
 
