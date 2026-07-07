@@ -3,7 +3,7 @@
   "description": "QA tooling for Claude Code by c-c0rtex: web-qa and tg-qa, with api-qa to come.",
   "owner": {
     "name": "c-c0rtex",
-    "url": "https://github.com/c-c0rtex"
+    "url": "https://codeberg.org/c-c0rtex"
   },
   "plugins": [
     {
@@ -15,8 +15,8 @@
     {
       "name": "tg-qa",
       "source": {
-        "source": "github",
-        "repo": "c-c0rtex/tg-qa"
+        "source": "url",
+        "url": "https://codeberg.org/c-c0rtex/tg-qa.git"
       },
       "description": "Autonomous Telegram-bot QA: Telethon-driven E2E dialogs, reply & keyboard snapshot testing, specs generated from the bot's source code, zero-token test runs, media/stickers/voice, Mini App handoff to web-qa.",
       "version": "0.1.0"

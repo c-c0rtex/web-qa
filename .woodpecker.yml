@@ -1,0 +1,19 @@
+# Woodpecker CI (ci.codeberg.org) — mirrors ci-local.sh.
+# The Playwright base image ships node + chromium's system libraries; uv is installed
+# per-run and manages the Python env. Enable this repo at https://ci.codeberg.org.
+when:
+  - event: [push, pull_request]
+
+steps:
+  - name: ci
+    image: mcr.microsoft.com/playwright:v1.55.0-noble
+    commands:
+      - curl -LsSf https://astral.sh/uv/install.sh | sh
+      - export PATH="$HOME/.local/bin:$PATH"
+      - python3 -m json.tool .claude-plugin/plugin.json > /dev/null
+      - python3 -m json.tool .claude-plugin/marketplace.json > /dev/null
+      - uv sync
+      - uv run ruff check runners tests
+      - uv run pytest -q
+      - uv run playwright install chromium
+      - uv run pytest -m integration -q
