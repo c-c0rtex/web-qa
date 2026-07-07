@@ -6,6 +6,14 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.3.6 (plugin distribution)
+
+- **Plugin-cache-safe layout** — `SKILL.md` moved to `skills/web-qa/`, every command
+  referenced as `${CLAUDE_PLUGIN_ROOT}/bin/web-qa-*` with a git-clone fallback, so
+  plugin installs resolve tooling deterministically (no reliance on `bin/` being on PATH)
+- **Sister skill published** — [tg-qa](https://github.com/c-c0rtex/tg-qa) (autonomous
+  Telegram-bot QA) joins the `c-c0rtex` marketplace alongside web-qa
+
 ## Shipped — v0.3.5 (reliability & adoption)
 
 - **Live locator probe** — generated locators are verified against the RUNNING app before
