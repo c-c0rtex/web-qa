@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -176,11 +177,19 @@ def main() -> int:
     src.add_argument("--diff", help="git ref to diff against (e.g. main, HEAD~3)")
     src.add_argument("--task", help="free-text feature/task description")
     src.add_argument("--cover-gaps", action="store_true",
-                     help="target the app-map routes no existing test case touches")
+                     help="target the app-map routes no test case touches, and the controls "
+                          "no test case names")
     ap.add_argument("--out", help="output file name inside scenarios/ (default: derived)")
     ap.add_argument("--prefix", default="G", help="TC id prefix letter(s), default G")
     ap.add_argument("--force", action="store_true", help="overwrite existing scenario file")
+    # This runner spends money too — one `opus` call — and it was the only one of the three
+    # that could not be capped from the command line.
+    ap.add_argument("--max-usd", type=float, default=None,
+                    help="hard LLM spend ceiling for this run (0 = no guard). Optional: falls "
+                         "back to WEBQA_MAX_USD, then `max_usd` in .web-qa/config.json, then $5.00")
     args = ap.parse_args()
+    if args.max_usd is not None:
+        os.environ["WEBQA_MAX_USD"] = str(args.max_usd)
 
     proj = load_project(args.alias)
     apply_project_budget(proj)

@@ -1999,3 +1999,17 @@ def test_matrix_reports_untouched_controls():
                           set(), None, frozenset(), {"/packing": ["kanban", "tree"]})
     assert "Untouched controls:** 2 on 1 route(s)" in md
     assert "«kanban»" in md
+
+
+def test_every_money_spending_runner_can_be_capped_from_the_command_line():
+    """gen_scenarios calls `opus` once per invocation and was the only runner with no
+    --max-usd flag: the ceiling could be raised for spec-gen and silently forgotten here."""
+    import inspect
+
+    import gen_scenarios
+    import maintain
+    import spec_gen
+    for mod in (gen_scenarios, maintain, spec_gen):
+        src = inspect.getsource(mod.main)
+        assert '"--max-usd"' in src, mod.__name__
+        assert 'os.environ["WEBQA_MAX_USD"] = str(args.max_usd)' in src, mod.__name__
