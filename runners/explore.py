@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -30,6 +29,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 from playwright.sync_api import sync_playwright
 
+from progress import Progress, emit, fmt_bytes
 from registry import registry_path
 from route_mine import as_template, mine_routes
 
@@ -191,7 +191,7 @@ def run_fixture_cmd(proj: dict, *, teardown: bool = False) -> None:
     cmd = proj.get(key)
     if not cmd:
         return
-    print(f"[fixtures] {key}: {cmd}", file=sys.stderr)
+    emit("fixtures", f"{key}: {cmd}")
     proc = subprocess.run(cmd, shell=True, cwd=proj.get("path") or ".", timeout=600)
     if proc.returncode != 0:
         raise SystemExit(f"{key} failed (exit {proc.returncode}): {cmd}")
@@ -351,15 +351,39 @@ def normalize_for_dedup(url: str) -> str:
 INTERACTIVE_CLICKS_PER_PAGE = 12
 
 
-def interactive_discover(page, origin: str) -> list[str]:
-    """Opt-in pass for apps with runtime-only navigation: click non-link clickables and
-    harvest pushState URL changes. Mutation safety is enforced at the NETWORK level, not
-    by guessing button semantics from text — every non-GET request is aborted for the
-    duration of the pass, so a "Delete" button physically cannot reach the backend.
-    Known limits (documented in SKILL.md): the valve covers what Chromium routes through
-    request interception — WebSocket frames on already-open connections bypass it, and a
-    GET with server-side side effects (an anti-pattern, but real) is let through."""
+DIALOG_ARIA_MAX = 8000
+# A fresh snapshot under half the previous size is a page captured before it finished
+# rendering, not a page that lost half its DOM.
+ARIA_SHRINK_RATIO = 0.5
+
+
+def capture_modal(page) -> str:
+    """The ARIA snapshot of a modal that is open right now, or "".
+
+    Dialogs are the one part of a UI the crawler never saw: they are not routes, and nothing
+    links to them. So the map said nothing about them — and the prompt rule "an element with
+    no accessible name cannot be found by getByLabel" could never fire, because there was no
+    element to look at. The generator wrote `getByRole('dialog').getByLabel(/Name/i)` and the
+    spec hung for ten seconds on a field that has no label at all."""
+    try:
+        dlg = page.locator("[role=dialog], dialog[open]").first
+        if not dlg.is_visible(timeout=500):
+            return ""
+        return dlg.aria_snapshot()[:DIALOG_ARIA_MAX]
+    except Exception:
+        return ""
+
+
+def interactive_discover(page, origin: str) -> tuple[list[str], list[dict]]:
+    """Opt-in pass for apps with runtime-only navigation: click non-link clickables, harvest
+    pushState URL changes AND snapshot any modal that opens. Mutation safety is enforced at
+    the NETWORK level, not by guessing button semantics from text — every non-GET request is
+    aborted for the duration of the pass, so a "Delete" button physically cannot reach the
+    backend. Known limits (documented in SKILL.md): the valve covers what Chromium routes
+    through request interception — WebSocket frames on already-open connections bypass it, and
+    a GET with server-side side effects (an anti-pattern, but real) is let through."""
     discovered: list[str] = []
+    dialogs: list[dict] = []
     base_url = page.url
 
     def guard(route):
@@ -371,37 +395,62 @@ def interactive_discover(page, origin: str) -> list[str]:
     def on_dialog(dialog):
         dialog.dismiss()
 
+    def dismiss_overlays() -> None:
+        """A hamburger menu or a dropdown left open covers the page, and EVERY later click
+        times out on it. This pass used to click the first button it found — often «Menu» —
+        and then silently discover nothing at all for the rest of the page."""
+        for _ in range(2):
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(120)
+            except Exception:
+                return
+
+    def back_to_base() -> None:
+        if page.url != base_url:
+            try:
+                page.goto(base_url, wait_until="domcontentloaded", timeout=10000)
+                page.wait_for_timeout(200)
+            except Exception:
+                pass
+
     page.route("**/*", guard)
     page.on("dialog", on_dialog)
     try:
         sel = "button, [role=button], [role=tab], [role=menuitem]"
         count = min(page.locator(sel).count(), INTERACTIVE_CLICKS_PER_PAGE)
         for i in range(count):
+            dismiss_overlays()
+            trigger = ""
             try:
-                page.locator(sel).nth(i).click(timeout=1500)
+                el = page.locator(sel).nth(i)
+                trigger = (el.get_attribute("aria-label") or el.inner_text(timeout=500) or "").strip()
+                el.click(timeout=1500)
                 page.wait_for_timeout(400)
             except Exception:
+                back_to_base()      # something is still covering the page — start clean
                 continue
-            if page.url == base_url:
-                continue
-            t = urlparse(page.url)
-            if f"{t.scheme}://{t.netloc}" == origin and page.url not in discovered:
-                discovered.append(page.url)
-            try:
-                page.go_back(wait_until="domcontentloaded", timeout=5000)
-            except Exception:
-                pass
+
+            snap = capture_modal(page)
+            if snap and not any(d["aria"] == snap for d in dialogs):
+                dialogs.append({"trigger": trigger[:60], "aria": snap})
+
             if page.url != base_url:
-                page.goto(base_url, wait_until="domcontentloaded", timeout=10000)
+                u = urlparse(page.url)
+                if f"{u.scheme}://{u.netloc}" == origin and page.url not in discovered:
+                    discovered.append(page.url)
+                back_to_base()
+            else:
+                dismiss_overlays()
     finally:
         page.remove_listener("dialog", on_dialog)
         page.unroute("**/*")
-    return discovered
+    return discovered, dialogs
 
 
 def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
           per_template: int = 2, vp_entry: dict | None = None,
-          seed_paths: list[str] | None = None, interactive: bool = False) -> list[dict]:
+          seed_paths: list[str] | None = None, interactive: bool = False, bar=None) -> list[dict]:
     """BFS over same-origin URLs, return list of page summaries.
     Visits at most `per_template` concrete URLs per normalized route template so
     entity cards (/orders/1, /orders/2, …) don't eat the whole max_pages budget.
@@ -462,6 +511,8 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
                     pass  # SPA with polling — bounded wait is enough
             except Exception as e:
                 pages.append({"url": url, "error": str(e)})
+                if bar is not None:
+                    bar.step(f"{urlparse(url).path or '/'}  {str(e)[:60]}", "ERR")
                 continue
             # SPA redirected us elsewhere (e.g. /login → / for an authenticated session):
             # record the redirect instead of duplicating the landing page's row
@@ -470,12 +521,17 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
                 if landed_key in visited:
                     pages.append({"path": urlparse(url).path or "/",
                                   "redirected_to": urlparse(page.url).path or "/"})
+                    if bar is not None:
+                        bar.step(f"{urlparse(url).path or '/'} → {urlparse(page.url).path or '/'}",
+                                 "REDI")
                     continue
                 visited.add(landed_key)
             try:
                 summary = extract_page_summary(page)
             except Exception as e:
                 pages.append({"url": url, "error": f"extract failed: {e}"})
+                if bar is not None:
+                    bar.step(f"{urlparse(url).path or '/'}  extract failed: {str(e)[:50]}", "ERR")
                 continue
             try:
                 # role/name ground truth for getByRole — far better selector grounding
@@ -498,6 +554,10 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
             except Exception:
                 pass
             pages.append(summary)
+            if bar is not None:
+                aria_n = len(summary.get("aria") or "")
+                extra = f"aria {fmt_bytes(aria_n)}" if aria_n else "no aria"
+                bar.step(f"{summary.get('path', url)}  ({extra}, queue {len(queue)})")
 
             # Enqueue same-origin internal links
             for link in summary.get("links", []):
@@ -505,10 +565,16 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
 
             if interactive:
                 try:
-                    for found in interactive_discover(page, origin):
+                    found_urls, dialogs = interactive_discover(page, origin)
+                    for found in found_urls:
                         try_enqueue(found)
+                    if dialogs:
+                        summary["dialogs"] = dialogs
+                        if bar is not None:
+                            bar.note(f"{summary.get('path', url)}: captured "
+                                     f"{len(dialogs)} dialog(s)")
                 except Exception as e:
-                    print(f"[explore] interactive pass failed on {url}: {e}", file=sys.stderr)
+                    emit("explore", f"interactive pass failed on {url}: {e}")
 
         browser.close()
     return pages
@@ -558,6 +624,12 @@ def merge_pages(prev: list[dict], fresh: list[dict], today: str) -> tuple[list[d
     previous entry over (marked stale) keeps ground truth that specs already depend on."""
     fresh_by = {page_key(p): p for p in fresh if page_key(p)}
     fresh_templates = {as_template(k) for k in fresh_by}
+    # Dialogs are captured only by `--interactive`. A plain re-crawl would otherwise erase
+    # what an expensive interactive pass found, and nothing would say so.
+    prev_dialogs = {page_key(p): p["dialogs"] for p in prev if p.get("dialogs") and page_key(p)}
+    for k, page in fresh_by.items():
+        if not page.get("dialogs") and k in prev_dialogs:
+            page["dialogs"] = prev_dialogs[k]
     merged = list(fresh)
     carried: list[str] = []
     for p in prev:
@@ -577,10 +649,19 @@ def merge_pages(prev: list[dict], fresh: list[dict], today: str) -> tuple[list[d
         page_key(p) for p in prev
         if p.get("aria") and page_key(p) in fresh_by and not fresh_by[page_key(p)].get("aria")
     )
+    # A snapshot can also SHRINK: the page was captured before its table loaded, and the map
+    # silently traded a full DOM for a skeleton. `lost_aria` only catches total disappearance.
+    shrunk_aria = sorted(
+        page_key(p) for p in prev
+        if p.get("aria") and page_key(p) in fresh_by
+        and 0 < len(fresh_by[page_key(p)].get("aria") or "") < len(p["aria"]) * ARIA_SHRINK_RATIO
+    )
     report = {
         "carried_over": sorted(carried),
         "new_routes": sorted(k for k in fresh_by if k and k not in prev_keys),
         "lost_aria": lost_aria,
+        "shrunk_aria": shrunk_aria,
+        "dialogs": sum(len(p.get("dialogs") or []) for p in merged),
     }
     return merged, report
 
@@ -686,8 +767,26 @@ def schema_brief(openapi: dict, schema: dict) -> str:
     return t or "object"
 
 
+def param_constraints(schema: dict) -> str:
+    """`[1..200]=50` — the bounds and default a query parameter declares.
+
+    Printing the bare type let a spec ask for `?size=500` against a declared `maximum: 200`
+    and read the resulting 422 as the app being broken. A bound the map does not state is a
+    bound the generator will cross."""
+    lo, hi = schema.get("minimum"), schema.get("maximum")
+    bits = ""
+    if lo is not None or hi is not None:
+        bits += f"[{'' if lo is None else lo}..{'' if hi is None else hi}]"
+    if schema.get("enum"):
+        bits += "(" + "|".join(str(v) for v in schema["enum"][:6]) + ")"
+    if schema.get("default") is not None:
+        bits += f"={schema['default']}"
+    return bits
+
+
 def op_params(openapi: dict, op: dict, limit: int = 16) -> str:
-    """`query: page:integer, size:integer, q:string` — the filters an endpoint actually accepts.
+    """`query: page:integer[1..]=1, size:integer[1..200]=50, q:string` — the filters an
+    endpoint accepts AND the bounds it enforces.
 
     Only the request BODY was ever mined. A GET's query contract lived nowhere, so a spec that
     needed a filtered list invented one and the API answered 422. Path params are in the URL
@@ -699,7 +798,7 @@ def op_params(openapi: dict, op: dict, limit: int = 16) -> str:
         schema = deref(openapi, prm.get("schema") or {})
         t = schema.get("type") or "any"
         star = "*" if prm.get("required") else ""
-        out.append(f"{prm['name']}{star}:{t}")
+        out.append(f"{prm['name']}{star}:{t}{param_constraints(schema)}")
     return "query: " + ", ".join(out[:limit]) if out else ""
 
 
@@ -823,7 +922,14 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
                     if p.get("aria_truncated") or len(a) > ARIA_PAGE_MAX else "")
             route = p.get("template") or p.get("path", "")
             sampled = f"\n_(sampled from `{p['sampled_from']}`)_" if p.get("sampled_from") else ""
-            lines.append(f"### `{route}`{sampled}\n```yaml\n{clipped}{note}\n```")
+            # Modals live INSIDE their route's block on purpose: spec_gen slices the ARIA
+            # section by route, so a dialog attached anywhere else would never reach the
+            # prompt of the test case that opens it.
+            modals = "".join(
+                f"\n\n# --- dialog opened by «{d['trigger']}» ---\n{d['aria']}"
+                for d in (p.get("dialogs") or [])
+            )
+            lines.append(f"### `{route}`{sampled}\n```yaml\n{clipped}{note}{modals}\n```")
     lines.append("")
 
     # ===== Backend endpoints =====
@@ -919,9 +1025,9 @@ def main() -> int:
     backend = proj.get("backend_url") or target
     email, password = resolve_credentials(proj, args.email, args.password)
 
-    print(f"[explore] login → {backend}", file=sys.stderr)
+    emit("explore", f"login → {backend}")
     cookies, user_me, token = api_login(backend, email, password, proj)
-    print(f"[explore] logged in as {user_me.get('email')} ({user_me.get('role')})", file=sys.stderr)
+    emit("explore", f"logged in as {user_me.get('email')} ({user_me.get('role')})")
 
     storage = build_storage_state(cookies, target, token, proj)
     openapi = fetch_openapi(backend)
@@ -934,24 +1040,22 @@ def main() -> int:
     if not args.no_mine:
         mined = mine_routes(Path(proj["path"]), proj.get("frontend_dir"))
         if mined:
-            print(f"[explore] mined {len(mined)} route(s) from source "
-                  f"({', '.join(sorted({m['source'] for m in mined}))})", file=sys.stderr)
+            emit("explore", f"mined {len(mined)} route(s) from source ({', '.join(sorted({m['source'] for m in mined}))})")
     # concrete mined routes seed the queue; parametrized ones can't be built into a URL
     # without ids, but still land in the map (and the coverage denominator) via annotate
     seeds = [m["path"] for m in mined if "{" not in m["path"]]
 
     if mined and args.max_pages < len(mined):
         # the route count is known BEFORE the crawl — a cap below it guarantees blind spots
-        print(f"[explore] WARNING: --max-pages {args.max_pages} < {len(mined)} routes mined "
-              f"from source. Routes beyond the cap get no DOM, and specs for them will guess "
-              f"their selectors. Raise --max-pages to at least {len(mined)}.", file=sys.stderr)
+        emit("explore", f"WARNING: --max-pages {args.max_pages} < {len(mined)} routes mined from source. Routes beyond the cap get no DOM, and specs for them will guess their selectors. Raise --max-pages to at least {len(mined)}.")
 
-    print(f"[explore] crawling {target} (max_pages={args.max_pages}, viewport={label}"
-          f"{', interactive' if args.interactive else ''})", file=sys.stderr)
+    bar = Progress("explore", args.max_pages)
+    bar.start(f"crawling {target} (max_pages={args.max_pages}, viewport={label}"
+              f"{', interactive' if args.interactive else ''})")
     pages = crawl(target, storage, max_pages=args.max_pages, vp_entry=entry,
-                  seed_paths=seeds, interactive=args.interactive)
+                  seed_paths=seeds, interactive=args.interactive, bar=bar)
     crawled_count = len(pages)
-    print(f"[explore] crawled {crawled_count} pages", file=sys.stderr)
+    bar.finish(f"{crawled_count} page(s) crawled")
 
     out_name = f"app.context{suffix.replace('@', '.')}.md" if suffix else "app.context.md"
     out = Path(proj["path"]) / ".web-qa" / out_name
@@ -961,13 +1065,14 @@ def main() -> int:
         today = time.strftime("%Y-%m-%d", time.gmtime())
         pages, merge_report = merge_pages(load_prev_pages(out), pages, today)
     if merge_report["carried_over"]:
-        print(f"[explore] {len(merge_report['carried_over'])} route(s) not reached this crawl, "
-              f"carried over from the previous map: "
-              f"{', '.join(merge_report['carried_over'])}", file=sys.stderr)
+        emit("explore", f"{len(merge_report['carried_over'])} route(s) not reached this crawl, carried over from the previous map: {', '.join(merge_report['carried_over'])}")
     if merge_report["lost_aria"]:
         # a route we DID reach but whose snapshot vanished — the map got worse, say it out loud
-        print(f"[explore] REGRESSION: aria snapshot lost for "
-              f"{', '.join(merge_report['lost_aria'])}", file=sys.stderr)
+        emit("explore", f"REGRESSION: aria snapshot lost for {', '.join(merge_report['lost_aria'])}")
+    if merge_report.get("shrunk_aria"):
+        emit("explore", f"WARNING: aria snapshot shrank by more than half on "
+                        f"{', '.join(merge_report['shrunk_aria'][:6])} — the page was probably "
+                        f"captured before its data rendered; re-crawl or raise the settle wait")
 
     pages = annotate_origins(pages, mined)
 

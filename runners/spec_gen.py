@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, resolve_credentials
+from progress import Progress, emit
 from run_scenarios import (DEFAULT_BACKEND_PREFIXES, declared_type, extract_paths, norm_route,
                            split_tcs, tc_roles, tc_routes)
 
@@ -74,7 +75,7 @@ PROJECT CONTEXT:
 
 APP MAP (auto-crawled; REAL routes, form fields, button labels and table headers — trust it over guesses):
 {app_context}
-{dnd_section}
+{a11y_section}{dnd_section}
 
 TASK: Generate ONE Playwright spec file (TypeScript) for the test case below. Output ONLY raw .spec.ts code (no markdown fences, no commentary). The file will be saved verbatim and compiled by tsc.
 
@@ -92,14 +93,26 @@ REQUIREMENTS:
   2) `getByRole` with the accessible name (the ARIA snapshots in the APP MAP are ground truth
   for role/name), 3) `getByLabel` / `getByText`. NEVER CSS classes, XPath or positional nth()
 - Selector texts/labels MUST come from the APP MAP above when the route is listed there — do not invent button captions
-- Take the ROLE from the snapshot too, not from what the widget looks like. A picker rendered
-  as `combobox` is not `getByRole('button')`, and the visible caption inside it is a child
-  node, not the element's accessible name
+- READ THE SNAPSHOT SYNTAX EXACTLY. `- combobox "Customer"` means the accessible NAME is
+  "Customer". `- combobox: Pick a customer` means the element has NO name and that text is its
+  VALUE. Passing a `: value` into `getByRole(role, {{ name }})` matches nothing. So is taking
+  the role from the widget's looks: a picker rendered as `combobox` is not a `button`
 - If the snapshot shows an element with NO accessible name (a bare `- textbox` under a
   separate `- text: Title` node, `- button` with no quoted caption), then `getByLabel(...)`
   and `getByRole(..., {{ name }})` CANNOT match it — the app has no label association there.
-  Locate it structurally instead (`getByRole('dialog').getByRole('textbox').nth(i)`, or
-  `locator('input').near(page.getByText('Title'))`) and add a `// NOTE: unlabeled input` comment
+  Locate it structurally. VALID recipes, in order of preference:
+      page.getByRole('dialog').getByRole('textbox').nth(i)
+      page.locator('input:near(:text("Title"))')       // `:near()` is a SELECTOR, not a method
+      page.getByText('Title').locator('xpath=following::input[1]')
+  `page.locator('input').near(...)` DOES NOT EXIST — there is no `.near()` method on a Locator.
+  Add a `// NOTE: unlabeled input` comment wherever you do this
+- DIALOGS: a snapshot may carry `# --- dialog opened by «X» ---` blocks. That IS the modal's
+  real DOM — use it. If a route's snapshot has no such block, the crawl did not open its
+  dialogs (`web-qa-explore --interactive` does), and their absence is NOT evidence that their
+  fields have labels. Assume they do not: inside `getByRole('dialog')`, reach fields
+  structurally, never with `getByLabel(/Title/i)`. `getByLabel` inside a dialog is the single
+  most common way a generated spec hangs for ten seconds and dies naming a locator that never
+  existed
 - When a name occurs more than once in the snapshot, scope before matching
   (`page.getByRole('navigation').getByRole('link', {{ name: 'X' }})`) — an unscoped locator
   that resolves to 2+ elements fails on strict mode, not on the app being wrong
@@ -111,7 +124,14 @@ REQUIREMENTS:
   navigation waits use `page.waitForURL(...)`
 - Mock EXTERNAL third-party dependencies only (payments, outside APIs). NEVER mock or stub
   your own app's backend — the test must exercise the real stack
-- Do not hardcode IDs — use `?` if TC is generic about which entity, or pick a plausible id
+- NEVER hardcode an entity id, and never take one from the APP MAP. `/orders/48` in the map is
+  one sample from one crawl; by the time this spec runs, mutating specs have created and
+  deleted rows and id 48 may belong to something else or nothing. Discover it:
+      const list = await api.get(`{backend_url}/orders`);           // respect the declared bounds
+      const id = (await list.json()).items[0].id;                   // or find one matching the TC
+      await page.goto(`{frontend_url}/orders/${{id}}`, {{ waitUntil: 'domcontentloaded' }});
+  A spec that asserts `getByRole('heading', {{ name: /Order 48/ }})` is asserting the state of a
+  database, not the behaviour of a page
 - Keep the spec self-contained; no external helpers
 
 API CONTRACT RULE (the APP MAP states the contract — never guess it):
@@ -121,6 +141,10 @@ API CONTRACT RULE (the APP MAP states the contract — never guess it):
   `{{items:array, total:integer}}`, then `(await r.json()).filter(...)` is a crash, not a test
 - Comparing a wire enum (`Enum values` section) against a label the UI renders for it is
   wrong even when both sides are right. Compare wire values to wire values, UI text to UI text
+- Query parameters carry their BOUNDS: `size:integer[1..200]=50` rejects `?size=500` with 422.
+  Stay inside them; when a value is missing the endpoint uses the stated default
+- A response shape printed as a bare `object` (no fields) is genuinely untyped. Do not assume
+  it has a key: read it, assert on what the test case actually names, or assert the status only
 
 DATA CORRECTNESS RULE (a page that renders is not a page that is right):
 - When an Expected bullet names a value the app DERIVES from data — a KPI, a total, a count,
@@ -181,6 +205,11 @@ READING TEXT, URLS AND NUMBERS BACK OUT (how a correct spec still goes red):
   never `toHaveURL` a literal that carries one. Parse it:
       const q = new URL(page.url()).searchParams;
       expect(q.get('status')!.split(',').sort()).toEqual(['a', 'b'].sort());
+- A REDIRECT IS NOT INSTANT. `goto(..., {{ waitUntil: 'domcontentloaded' }})` returns before the
+  app hydrates, and a client-side route guard redirects after that. Reading `page.url()` on the
+  next line sees the URL you asked for, not the one you were sent to. Wait for it:
+      await page.waitForURL('**/', {{ timeout: 5000 }});      // or expect.poll on page.url()
+  This is how a spec reports "access was not blocked" about an app that blocked it correctly
 
 TIMING BUDGET (the test has {test_timeout_ms} ms in total):
 - Every explicit `timeout:` you write must be well under {test_timeout_ms} ms. A
@@ -190,11 +219,17 @@ TIMING BUDGET (the test has {test_timeout_ms} ms in total):
   The project already bounds actions and navigations; web-first assertions auto-wait
 - NEVER use `page.waitForTimeout()` — assert on the condition you are actually waiting for
 
-FIXTURE RULE:
-- Never reference a file path that you have not created in the test. To upload, build the
-  file in memory: `setInputFiles({{ name: 'x.pdf', mimeType: 'application/pdf',
-  buffer: Buffer.from(...) }})`. A path like `fixtures/sample.pdf` that nobody generates is
-  an ENOENT, not a test
+FIXTURE RULE (a file that exists is not a file the app can read):
+- Ask first what the app DOES with the upload.
+  STORES / ATTACHES it (a document on an order, an avatar) → an in-memory buffer is fine:
+      setInputFiles({{ name: 'qa.pdf', mimeType: 'application/pdf', buffer: Buffer.from(...) }})
+  PARSES it (import, preview, OCR, an AI parser, "we read the invoice number from it") → a
+  synthesized buffer WILL be rejected, and the spec then fails against a correct app.
+  `Buffer.from('%PDF-1.4 test content')` is not a PDF, and no `Buffer` is ever a valid .xlsx
+- For a parsed upload use a REAL fixture from the list above. If the list is empty, or holds
+  nothing of the needed type, `test.skip(true, 'needs fixtures/<name>.<ext>')` — a spec that
+  skips loudly beats one that fails for the wrong reason
+- Never reference a path you neither created nor were shown{fixtures_section}
 
 MUTATING DATA POLICY (applies when the TC creates/edits/deletes data):
 - NEVER mutate pre-existing data. The test must create its OWN target entity via the backend API
@@ -371,7 +406,7 @@ def apply_project_budget(proj: dict) -> None:
     try:
         os.environ["WEBQA_MAX_USD"] = str(float(v))
     except (TypeError, ValueError):
-        print(f"[gen] ignoring non-numeric `max_usd` in config.json: {v!r}", file=sys.stderr)
+        emit("gen", f"ignoring non-numeric `max_usd` in config.json: {v!r}")
 
 
 def llm_spend() -> dict:
@@ -380,6 +415,12 @@ def llm_spend() -> dict:
     with _ledger_lock:
         return {"spent_usd": round(_spent_usd, 4), "calls": _call_count,
                 "budget_usd": llm_budget_usd()}
+
+
+def spend_probe() -> tuple[float, float]:
+    """`(spent, budget)` for a Progress line. The ledger is process-global and thread-safe."""
+    with _ledger_lock:
+        return round(_spent_usd, 4), llm_budget_usd()
 
 
 def _check_budget() -> None:
@@ -457,10 +498,7 @@ def parse_claude_json(stdout: str) -> str:
         raise RuntimeError(f"claude session errored: {str(payload.get('result'))[:500]}")
     cost = payload.get("total_cost_usd")
     if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-        total = _record_spend(float(cost))
-        print(f"[llm] ${float(cost):.4f} this call, ${total:.2f} of "
-              f"${llm_budget_usd():.2f} budget ({payload.get('num_turns', '?')} turn(s))",
-              file=sys.stderr, flush=True)
+        _record_spend(float(cost))
     return strip_fences(str(payload.get("result") or ""))
 
 
@@ -647,13 +685,21 @@ def map_files(proj_dir: Path) -> list[Path]:
     return ([main] if main.is_file() else []) + sorted(webqa.glob("app.context.*.md"))
 
 
+RE_MAP_TIMESTAMP = re.compile(r"^<i>Auto-generated by web-qa Exploration on .*?</i>$", re.MULTILINE)
+
+
 def app_map_fingerprint(proj_dir: Path) -> str:
-    """Digest of the map as it is ON DISK.
+    """Digest of the map's CONTENT as it is on disk.
 
     Keying the spec cache on `load_app_context()` output digested a TRUNCATED map, so a
     re-crawl that changed anything past the truncation point left every cached spec looking
-    current."""
-    return tc_hash("".join(p.read_text(encoding="utf-8") for p in map_files(proj_dir)))
+    current.
+
+    The generated-at line is excluded on purpose: it changes on every crawl, so hashing it
+    meant a re-crawl that discovered nothing new still invalidated all N specs — and N times
+    the per-spec price is the most expensive thing this tool can do by accident."""
+    text = "".join(p.read_text(encoding="utf-8") for p in map_files(proj_dir))
+    return tc_hash(RE_MAP_TIMESTAMP.sub("", text))
 
 
 def load_app_context(proj_dir: Path, routes: set[str] | None = None,
@@ -711,6 +757,149 @@ def read_test_timeout(webqa: Path) -> int:
         return DEFAULT_TEST_TIMEOUT_MS
 
 
+# A spec THIS tool generated: `<scenario-stem>__tc-<id>-<title-slug>.spec.ts`. The leading
+# `_` of an ad-hoc/debug spec excludes it, and a hand-written `smoke.spec.ts` never matches.
+RE_GENERATED_SPEC = re.compile(r"^[^_][^/]*__tc-[a-z]*\d+.*\.spec\.ts$", re.IGNORECASE)
+
+
+def spec_file_name(scenario_stem: str, tc_id: str, title: str) -> str:
+    return f"{scenario_stem}__{slugify(tc_id + '-' + title)}.spec.ts"
+
+
+def expected_spec_names(webqa: Path) -> dict[str, str]:
+    """filename → `<scenario>::<TC-ID>` for every test case currently on disk."""
+    out: dict[str, str] = {}
+    scenarios = webqa / "scenarios"
+    for md in sorted(scenarios.glob("*.md")) if scenarios.is_dir() else []:
+        for tc in split_tcs(md.read_text(encoding="utf-8")):
+            name = spec_file_name(md.stem, tc["id"], tc.get("title", ""))
+            out[name] = f"{md.stem}::{tc['id']}"
+    return out
+
+
+def orphan_specs(webqa: Path) -> list[str]:
+    """Generated specs no test case defines any more.
+
+    The file name carries the TC's TITLE, so merely rewording a title makes spec-gen write a
+    NEW file and leave the old one behind. Nothing ever deleted it, and `matrix` then ran it:
+    a stale spec that can still mutate data and still block the deploy gate, with no test case
+    behind it to explain what it is for."""
+    specs = webqa / "specs"
+    if not specs.is_dir():
+        return []
+    expected = set(expected_spec_names(webqa))
+    return sorted(p.name for p in specs.glob("*.spec.ts")
+                  if RE_GENERATED_SPEC.match(p.name) and p.name not in expected)
+
+
+def prune_orphan_specs(webqa: Path, names: list[str]) -> list[str]:
+    """Delete the orphans and the markers/backups that trail them. Returns what went."""
+    removed = []
+    for name in names:
+        for suffix in ("", ".FAILED", ".bak", ".proposed"):
+            p = webqa / "specs" / (name + suffix)
+            if p.is_file():
+                p.unlink()
+                removed.append(p.name)
+    return removed
+
+
+def load_cache(cache_path: Path) -> dict:
+    """A damaged cache costs money, never correctness — regenerate rather than crash."""
+    if not cache_path.exists():
+        return {}
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        emit("gen", f"unreadable cache at {cache_path}, regenerating everything")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_cache(cache_path: Path, cache: dict) -> None:
+    """Write the spec cache atomically: rename(2) is the only step a kill can't interrupt.
+
+    Truncating the file in place and dying mid-write leaves invalid JSON, which the next run
+    treats as an empty cache — the same total loss this incremental save exists to prevent."""
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(cache_path)
+
+
+# axe rules that make a name-based locator impossible, mapped to what the generator must
+# stop doing. Nothing else in this list matters to a spec.
+A11Y_LOCATOR_RULES = {
+    "label": "form fields have NO label association → `getByLabel` cannot match them",
+    "button-name": "buttons have NO accessible name → `getByRole('button', {name})` cannot match them",
+    "select-name": "selects have NO accessible name → `getByRole('combobox', {name})` cannot match them",
+    "link-name": "links have NO accessible name → `getByRole('link', {name})` cannot match them",
+    "input-button-name": "input buttons have NO accessible name",
+    "aria-input-field-name": "ARIA inputs have NO accessible name",
+}
+
+
+def latest_a11y(webqa: Path) -> dict[str, int]:
+    """rule id → node count, from the newest passive report on disk. {} when none."""
+    reports = webqa / "reports"
+    if not reports.is_dir():
+        return {}
+    files = sorted(reports.rglob("a11y.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not files:
+        return {}
+    try:
+        data = json.loads(files[0].read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    counts: dict[str, int] = {}
+    for rec in data if isinstance(data, list) else []:
+        for v in rec.get("violations", []):
+            rid = v.get("id")
+            if rid in A11Y_LOCATOR_RULES:
+                counts[rid] = counts.get(rid, 0) + int(v.get("nodeCount") or 0)
+    return counts
+
+
+def a11y_section(webqa: Path) -> str:
+    """Tell the generator what axe already knows about this app's accessible names.
+
+    Two stages of this tool held the answer and neither spoke to the other: the passive run
+    reported `label` and `button-name` as critical violations while spec-gen kept writing
+    `getByLabel`, and the specs hung for ten seconds each on locators that could never match."""
+    counts = latest_a11y(webqa)
+    if not counts:
+        return ""
+    lines = ["\nACCESSIBILITY FACTS (measured by axe on this very app — not a guess):"]
+    for rid, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        lines.append(f"- `{rid}`: {n} element(s) — {A11Y_LOCATOR_RULES[rid]}")
+    lines.append("Prefer `getByTestId`, structural locators and `getByText` scoping over any "
+                 "name-based lookup on the affected roles. This is measured, not hypothetical.")
+    return "\n".join(lines) + "\n"
+
+
+FIXTURE_LIST_MAX = 25
+
+
+def fixtures_section(proj_dir: Path) -> str:
+    """Name the files a spec may upload. Deterministic, zero tokens.
+
+    Told only "never reference a path you did not create", the generator synthesized
+    `Buffer.from('%PDF-1.4 test content')` and named it `.pdf`. That is not a PDF: an importer
+    parses it, rejects it, and the spec fails against a correct app. It cannot choose a real
+    fixture it was never shown."""
+    d = proj_dir / ".web-qa" / "fixtures"
+    files = sorted(f for f in d.glob("*") if f.is_file() and not f.name.startswith(".")) \
+        if d.is_dir() else []
+    if not files:
+        return ("\nUPLOAD FIXTURES: none exist (`.web-qa/fixtures/` is empty or absent). If this "
+                "test case needs a file the app PARSES, `test.skip()` with a message naming the "
+                "fixture to add.\n")
+    listing = "\n".join(f"- `fixtures/{f.name}` ({f.stat().st_size} bytes)"
+                        for f in files[:FIXTURE_LIST_MAX])
+    return ("\nUPLOAD FIXTURES available at `<project>/.web-qa/fixtures/` (read with "
+            "`fs.readFileSync(path.resolve(__dirname, '../fixtures/<name>'))`):\n"
+            + listing + "\n")
+
+
 def load_seed(proj_dir: Path) -> str:
     """Optional committed .web-qa/seed.spec.ts — human-verified auth/setup code. Far stronger
     grounding than a prose auth hint: the model reuses working patterns instead of inventing."""
@@ -730,15 +919,26 @@ def seed_prompt_section(seed: str) -> str:
 
 def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
             proj: dict | None = None, live_probe: bool = True,
-            role: str | None = None) -> tuple[str, str | None, str | None]:
+            role: str | None = None, bar=None) -> tuple[str, str | None, str | None]:
     """Generate + validate one spec. Returns (tc_key, error_or_None, probe_warning_or_None).
 
     Acceptance ladder: parse check (`--list`) is a hard gate with retry; the live locator
     probe earns ONE extra retry with real-DOM feedback, but never blocks acceptance — a
     probed miss can legitimately be a mid-flow element the entry page doesn't have.
     `role` = the TC's declared role: the probe must see the page under the SAME session
-    the spec will use, or role-gated elements produce false verdicts."""
+    the spec will use, or role-gated elements produce false verdicts.
+
+    A retry is a SECOND FULL model call, and a retry that then succeeds used to print
+    nothing at all: the log showed one `OK` for two calls, and the run's cost was a third
+    higher than the per-spec price implied. It says so now."""
     from locator_probe import probe_feedback, probe_spec
+
+    def _note(msg: str) -> None:
+        if bar is not None:
+            bar.note(msg)
+        else:
+            emit("gen", msg)
+
     attempt_prompt = prompt
     last_err: str | None = None
     probe_retried = False
@@ -746,12 +946,14 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
         code = call_claude(attempt_prompt)
         if not code.strip():
             last_err = "empty output from claude"
+            _note(f"RETRY {tc_key}: empty output (costs another full call)")
             continue
         out_path.write_text(postprocess_spec(code), encoding="utf-8")
         parse_err = validate_spec(webqa, out_path)
         if parse_err is not None:
             last_err = f"playwright --list rejected spec: {parse_err}"
             attempt_prompt = prompt + RETRY_SUFFIX.format(error=parse_err)
+            _note(f"RETRY {tc_key}: spec did not parse (costs another full call)")
             continue
         fb = None
         if proj is not None and live_probe:
@@ -759,13 +961,16 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
         if fb and not probe_retried:
             probe_retried = True
             attempt_prompt = prompt + PROBE_RETRY_SUFFIX.format(feedback=fb)
+            _note(f"RETRY {tc_key}: locators missing on the entry page "
+                  f"(costs another full call)")
             continue
         return tc_key, None, fb
     return tc_key, last_err, None
 
 
 def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
-              force: bool = False, workers: int = 1, live_probe: bool = True) -> dict:
+              force: bool = False, workers: int = 1, live_probe: bool = True,
+              prune: bool = False) -> dict:
     proj = load_project(alias)
     apply_project_budget(proj)
     proj_dir = Path(proj["path"])
@@ -774,7 +979,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     specs_dir = webqa / "specs"
     specs_dir.mkdir(parents=True, exist_ok=True)
     cache_path = specs_dir / ".cache.json"
-    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    cache = load_cache(cache_path)
 
     frontend_url = proj.get("target_url") or proj.get("frontend_url") or "http://127.0.0.1:3000"
     backend_url = proj.get("backend_url") or frontend_url
@@ -790,11 +995,13 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     seed = load_seed(proj_dir)
     seed_section = seed_prompt_section(seed)
     test_timeout_ms = read_test_timeout(webqa)
+    fixture_list = fixtures_section(proj_dir)
+    a11y_facts = a11y_section(webqa)
     frontend_dir = proj_dir / proj["frontend_dir"] if proj.get("frontend_dir") else proj_dir
     dnd_section = dnd_recipe_section(detect_dnd_library(frontend_dir))
     # Cache key covers everything that shapes the output: TC body + template + app map + seed + urls
     env_hash = tc_hash(PROMPT_TEMPLATE + app_map_digest + seed + frontend_url + backend_url
-                       + dnd_section + str(test_timeout_ms))
+                       + dnd_section + str(test_timeout_ms) + fixture_list + a11y_facts)
 
     md_files = sorted(scenarios_dir.glob("*.md"))
     if not md_files:
@@ -832,8 +1039,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
             if not force and cache.get(tc_key) == body_hash:
                 summary["skipped_cached"].append(tc_key)
                 continue
-            slug = slugify(tc_id + "-" + tc.get("title", ""))
-            out_path = specs_dir / f"{scenario_stem}__{slug}.spec.ts"
+            out_path = specs_dir / spec_file_name(scenario_stem, tc_id, tc.get("title", ""))
             prompt = PROMPT_TEMPLATE.format(
                 stack=stack,
                 frontend_url=frontend_url,
@@ -843,6 +1049,8 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 test_data_prefix=test_data_prefix,
                 auth_login_hint=auth_login_hint,
                 test_timeout_ms=test_timeout_ms,
+                fixtures_section=fixture_list,
+                a11y_section=a11y_facts,
                 seed_section=seed_section,
                 app_context=load_app_context(proj_dir, tc_routes(tc.get("body", "")),
                                              tc_api_groups(tc.get("body", ""), backend_prefixes)),
@@ -853,20 +1061,30 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
 
     if summary["skipped_missing_role"]:
         gaps = ", ".join(f"{r['tc']} (role {r['role']!r})" for r in summary["skipped_missing_role"])
-        print(f"[gen] {len(summary['skipped_missing_role'])} TC(s) skipped, no such role in "
-              f"projects.json — add `roles: [{{name, email, password}}]`: {gaps}",
-              file=sys.stderr, flush=True)
+        emit("gen", f"{len(summary['skipped_missing_role'])} TC(s) skipped, no such role in "
+                    f"projects.json — add `roles: [{{name, email, password}}]`: {gaps}")
 
     budget_stop: str | None = None
     if jobs:
         budget = llm_budget_usd()
         cap = f"${budget:.2f} budget" if budget > 0 else "budget guard OFF"
-        print(f"[gen] {len(jobs)} spec(s) to generate, {workers} worker(s), {cap}", flush=True)
+        bar = Progress("gen", len(jobs), spend_probe)
+        bar.start(f"{len(jobs)} spec(s) to generate, {workers} worker(s), {cap}")
         hash_by_key = {k: h for k, _, _, h, _ in jobs}
         path_by_key = {k: o for k, _, o, _, _ in jobs}
         projected_warned = False
+
+        def _job(k, prompt, out, role):
+            # Announce from the worker thread: with N>1 the completion lines alone make the
+            # run look serial, because nothing says a second job was ever picked up.
+            bar.begin(k)
+            try:
+                return gen_one(k, prompt, out, webqa, proj, live_probe, role, bar)
+            finally:
+                bar.leave()
+
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futures = {pool.submit(gen_one, k, p, o, webqa, proj, live_probe, role): k
+            futures = {pool.submit(_job, k, p, o, role): k
                        for k, p, o, _, role in jobs}
             for fut in as_completed(futures):
                 tc_key = futures[fut]
@@ -881,24 +1099,30 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                     # the real cause under one marker per remaining TC.
                     summary["skipped_over_budget"].append(tc_key)
                     budget_stop = budget_stop or str(e)
+                    bar.step(tc_key, "SKIP")
                     continue
                 except Exception as e:
                     err = str(e)
                 if warning:
                     summary["probe_warnings"].append({"tc": tc_key, "warning": warning})
-                    print(f"[gen] PROBE {tc_key}: unresolved locators remain\n{warning}",
-                          file=sys.stderr, flush=True)
+                    bar.note(f"PROBE {tc_key}: unresolved locators remain\n{warning}")
                 if err is None:
                     cache[tc_key] = hash_by_key[tc_key]
+                    # Persist NOW, not after the loop. A run that generates 70 specs and is
+                    # interrupted at the 69th used to lose every cache entry with it — the
+                    # specs stayed on disk, but the next invocation paid for all of them
+                    # again. `as_completed` hands us one result at a time, so this write is
+                    # serialized and costs nothing next to a model call.
+                    save_cache(cache_path, cache)
                     summary["generated"].append(tc_key)
                     marker.unlink(missing_ok=True)
-                    print(f"[gen] OK   {tc_key}", flush=True)
+                    bar.step(tc_key, "OK")
                 else:
                     summary["errors"].append({"tc": tc_key, "error": err})
                     # durable loud marker in specs/ — a silently missing spec is invisible,
                     # a *.FAILED file next to its siblings is not
                     marker.write_text(f"{tc_key}\n{err}\n", encoding="utf-8")
-                    print(f"[gen] FAIL {tc_key}: {err[:200]}", file=sys.stderr, flush=True)
+                    bar.step(f"{tc_key}: {err[:120]}", "FAIL")
 
                 # Warn while there is still something to decide. Running out of budget on the
                 # last TC of twenty is a worse outcome than being told at the third.
@@ -907,22 +1131,46 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                     projected = projected_total(len(jobs), done)
                     if done >= 2 and projected is not None and projected > budget:
                         projected_warned = True
-                        print(f"[gen] PROJECTION ${projected:.2f} for {len(jobs)} spec(s) exceeds "
-                              f"the ${budget:.2f} ceiling — raise --max-usd now or expect a stop",
-                              file=sys.stderr, flush=True)
+                        bar.note(f"PROJECTION ${projected:.2f} for {len(jobs)} spec(s) exceeds "
+                                 f"the ${budget:.2f} ceiling — raise --max-usd now or expect a stop")
 
-    cache_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False))
+        bar.finish(f"{len(summary['generated'])} generated, {len(summary['errors'])} failed")
+
+    # Specs no test case defines any more. Reported, never deleted silently: the file could
+    # have been written by hand, and a wrong deletion is not recoverable from the summary.
+    orphans = orphan_specs(webqa)
+    if orphans:
+        summary["orphan_specs"] = orphans
+        if prune:
+            summary["pruned"] = prune_orphan_specs(webqa, orphans)
+            live = set(expected_spec_names(webqa).values())
+            for key in [k for k in cache if k not in live]:
+                cache.pop(key)
+            emit("gen", f"PRUNED {len(summary['pruned'])} orphan file(s)")
+        else:
+            shown = ", ".join(orphans[:5]) + ("…" if len(orphans) > 5 else "")
+            emit("gen", f"ORPHAN SPEC — {len(orphans)} spec(s) have no test case behind them: {shown}")
+            emit("gen", "a reworded TC title makes a new file and leaves the old one behind. "
+                        "Delete them with `--prune`, or restore the title.")
+
+    save_cache(cache_path, cache)
     summary["llm"] = llm_spend()
+    # A run that made more calls than it generated specs paid for retries. Naming the
+    # overhead is the difference between "specs cost $0.25" and "this run cost $0.31 each".
+    attempted = len(summary["generated"]) + len(summary["errors"])
+    extra = summary["llm"]["calls"] - attempted
+    if extra > 0:
+        summary["llm"]["retries"] = extra
 
     if summary["skipped_over_budget"]:
         spent = summary["llm"]["spent_usd"]
         left = summary["skipped_over_budget"]
         print(f"\n[gen] BUDGET STOP — {budget_stop}", file=sys.stderr)
-        print(f"[gen] {len(left)} TC(s) never reached the model (no .FAILED written): "
-              f"{', '.join(left)}", file=sys.stderr)
+        emit("gen", f"{len(left)} TC(s) never reached the model (no .FAILED written): "
+                    f"{', '.join(left)}")
         # the cache holds what succeeded, so a resume regenerates only what is missing
-        print(f"[gen] resume (keep your other flags): web-qa-spec-gen --alias {alias} "
-              f"--max-usd {spent + 0.5 * max(1, len(left)):.2f}", file=sys.stderr, flush=True)
+        emit("gen", f"resume (keep your other flags): web-qa-spec-gen --alias {alias} "
+                    f"--max-usd {spent + 0.5 * max(1, len(left)):.2f}")
     return summary
 
 
@@ -941,12 +1189,15 @@ def main() -> int:
                          f"${DEFAULT_MAX_USD:.2f}")
     ap.add_argument("--no-probe", action="store_true",
                     help="skip the live locator check against the running app")
+    ap.add_argument("--prune", action="store_true",
+                    help="delete generated specs that no test case defines any more; "
+                         "without it they are only reported as `orphan_specs`")
     args = ap.parse_args()
     if args.max_usd is not None:
         os.environ["WEBQA_MAX_USD"] = str(args.max_usd)
 
     res = gen_specs(args.alias, all_tcs=args.all, only_tc=args.tc, force=args.force,
-                    workers=args.workers, live_probe=not args.no_probe)
+                    workers=args.workers, live_probe=not args.no_probe, prune=args.prune)
     print(json.dumps(res, indent=2, ensure_ascii=False))
     # A budget stop leaves work undone, so it is not success — but it is not an error either,
     # and `skipped_missing_role` is a registry gap the human fixes, never a failed run.

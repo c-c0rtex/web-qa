@@ -3,4 +3,4 @@
 # Usage: web-qa-run --alias <name> [--scenarios "*.md" | --include-mutating]
 set -e
 SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
-exec uv run --project "$SKILL" python "$SKILL/runners/run_scenarios.py" "$@"
+exec uv run --project "$SKILL" python -u "$SKILL/runners/run_scenarios.py" "$@"

@@ -5,4 +5,4 @@
 
 set -e
 SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
-exec uv run --project "$SKILL" python "$SKILL/runners/explore.py" "$@"
+exec uv run --project "$SKILL" python -u "$SKILL/runners/explore.py" "$@"

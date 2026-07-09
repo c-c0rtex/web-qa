@@ -24,8 +24,10 @@ from pathlib import Path
 from coverage import control_coverage, control_gap_section
 from explore import load_project
 from matrix import routes_from_context
+from progress import Progress, emit
 from run_scenarios import classify, declared_type, split_tcs, tc_routes
-from spec_gen import apply_project_budget, call_claude, llm_spend, load_app_context, slugify
+from spec_gen import (apply_project_budget, call_claude, llm_spend, load_app_context,
+                      slugify, spend_probe)
 
 # Deciding WHAT to test is judgment work, and it runs exactly once per invocation —
 # unlike spec-gen, which fans a mechanical translation out over every test case. The
@@ -219,9 +221,8 @@ def main() -> int:
                          "under UNTOUCHED CONTROLS below — start with "
                          + ", ".join(f"{r} ({len(n)})" for r, n in worst))
         args.task = "Cover " + "; and ".join(wants)
-        print(f"[generate] --cover-gaps targeting {len(uncovered)} route(s) and "
-              f"{sum(len(n) for n in gaps.values())} control(s) on {len(gaps)} route(s)",
-              file=sys.stderr)
+        emit("generate", f"--cover-gaps targeting {len(uncovered)} route(s) and "
+                         f"{sum(len(n) for n in gaps.values())} control(s) on {len(gaps)} route(s)")
 
     if args.diff:
         source_section = git_diff_summary(proj_dir, args.diff)
@@ -253,8 +254,15 @@ def main() -> int:
                            roles_section=roles_section,
                            source_section=source_section, prefix=args.prefix,
                            language=proj.get("language") or "English")
-    print(f"[generate] asking claude ({'diff ' + args.diff if args.diff else 'task'})…", file=sys.stderr)
-    md = call_claude(prompt, timeout=240, model=SCENARIO_MODEL, effort=SCENARIO_EFFORT)
+    bar = Progress("generate", 1, spend_probe)
+    bar.start(f"asking claude ({'diff ' + args.diff if args.diff else 'task'}) on "
+              f"{SCENARIO_MODEL}/{SCENARIO_EFFORT} — one call, {len(prompt)} chars of context")
+    bar.begin("scenario")
+    try:
+        md = call_claude(prompt, timeout=240, model=SCENARIO_MODEL, effort=SCENARIO_EFFORT)
+    finally:
+        bar.leave()
+    bar.step("scenario", "OK" if md.strip() else "FAIL")
     if not md.strip():
         print(json.dumps({"error": "empty output from claude"}), file=sys.stderr)
         return 1
@@ -275,7 +283,7 @@ def main() -> int:
         kind, reasons = classify(tc["body"])
         if declared_type(tc["body"]) == "passive" and kind == "mutating":
             conflicts.append({"id": tc["id"], "reasons": reasons})
-            print(f"[generate] WARNING {tc['id']}: {'; '.join(reasons)}", file=sys.stderr)
+            emit("generate", f"WARNING {tc['id']}: {'; '.join(reasons)}")
 
     summary = {"out": str(out_path), "tc_count": len(tc_ids), "tc_ids": tc_ids}
     if conflicts:
@@ -286,9 +294,8 @@ def main() -> int:
     _, still_uncovered = route_coverage(webqa)
     summary["uncovered_routes"] = still_uncovered
     if still_uncovered:
-        print(f"[generate] COVERAGE GAP — no test case touches: {', '.join(still_uncovered)}"
-              f"\n[generate] run `web-qa-generate --alias {args.alias} --cover-gaps` to close them",
-              file=sys.stderr)
+        emit("generate", f"COVERAGE GAP — no test case touches: {', '.join(still_uncovered)}")
+        emit("generate", f"run `web-qa-generate --alias {args.alias} --cover-gaps` to close them")
 
     still_gaps = control_coverage(webqa)
     if still_gaps:
@@ -296,8 +303,8 @@ def main() -> int:
         worst = sorted(still_gaps.items(), key=lambda kv: -len(kv[1]))[:3]
         detail = "; ".join(f"`{r}` ({len(n)})" for r, n in worst)
         total = sum(len(n) for n in still_gaps.values())
-        print(f"[generate] CONTROL GAP — {total} control(s) on {len(still_gaps)} route(s) are "
-              f"named by no test case; worst: {detail}", file=sys.stderr)
+        emit("generate", f"CONTROL GAP — {total} control(s) on {len(still_gaps)} route(s) are "
+                         f"named by no test case; worst: {detail}")
 
     summary["llm"] = llm_spend()
     print(json.dumps(summary, ensure_ascii=False))

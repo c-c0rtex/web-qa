@@ -26,6 +26,8 @@ from pathlib import Path
 import httpx
 from playwright.sync_api import sync_playwright, ConsoleMessage, Response
 
+from progress import Progress, emit
+
 from explore import (
     api_login,
     build_storage_state,
@@ -252,13 +254,25 @@ def materialize_path(path: str, ids: dict) -> str:
     return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", repl, path)
 
 
-def discover_ids(backend: str, cookies: dict, id_discovery: list[dict]) -> dict:
+def backend_client(cookies: dict, token: str | None) -> "httpx.Client":
+    """An httpx client that carries whatever the app's login handed back.
+
+    Cookies alone were sent. For a JWT app the login returns a bearer token and sets no
+    session cookie, so every backend probe a test case documents in its Steps answered 401 —
+    and the passive runner reported that as the test case failing. The token was already in
+    a local variable two frames up."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    return httpx.Client(cookies=cookies, headers=headers, timeout=10)
+
+
+def discover_ids(backend: str, cookies: dict, id_discovery: list[dict],
+                 token: str | None = None) -> dict:
     """Fetch a sample entity id per config entry
     (config.json: [{"endpoint": "/orders", "key": "order"}, ...])."""
     out: dict = {}
     if not id_discovery:
         return out
-    with httpx.Client(cookies=cookies, timeout=10) as cli:
+    with backend_client(cookies, token) as cli:
         for spec in id_discovery:
             endpoint, key = spec["endpoint"], spec["key"]
             try:
@@ -324,7 +338,7 @@ def visual_diff_pct(baseline_path: Path, current_path: Path) -> float | str | No
         mask = (arr.max(axis=2) > 20)
         return 100.0 * mask.sum() / mask.size
     except Exception as e:
-        print(f"[visual] diff failed: {e}", file=sys.stderr)
+        emit("visual", f"diff failed: {e}")
         return None
 
 
@@ -356,7 +370,7 @@ def save_diff_mask(baseline_path: Path, current_path: Path, out_path: Path) -> b
         Image.fromarray(out).save(out_path)
         return True
     except Exception as e:
-        print(f"[visual] diff mask failed: {e}", file=sys.stderr)
+        emit("visual", f"diff mask failed: {e}")
         return False
 
 
@@ -370,14 +384,30 @@ def apply_visual_masks(page, mask_selectors: list[str]) -> None:
     try:
         page.add_style_tag(content=css)
     except Exception as e:
-        print(f"[visual] mask failed: {e}", file=sys.stderr)
+        emit("visual", f"mask failed: {e}")
+
+
+def spec_for_tc(webqa: Path, tc_id: str) -> str | None:
+    """The generated spec that executes this test case, if one exists.
+
+    Two shapes, because the file name is `<scenario>__<slug(TC-ID + title)>.spec.ts` and a
+    title written entirely in a non-latin script slugifies to nothing: `…__tc-gap7.spec.ts`
+    alongside `…__tc-adm2--scope-level.spec.ts`. Anchoring on `tc-gap7-` alone missed every
+    Cyrillic-titled test case — the ones this project is full of.
+
+    Kept local (a glob, not an import) because spec_gen imports THIS module."""
+    slug = tc_id.lower()
+    specs = webqa / "specs"
+    hits = sorted(specs.glob(f"*__{slug}.spec.ts")) + sorted(specs.glob(f"*__{slug}-*.spec.ts"))
+    return hits[0].name if hits else None
 
 
 def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids: dict, reports_dir: Path,  # noqa: PLR0913
                    baseline_dir: Path, update_baseline: bool, visual_threshold: float,
                    backend_prefixes: tuple[str, ...], route_hints: list[dict],
                    visual_masks: list[str], visual_exclude: list[str], vp_suffix: str = "",
-                   update_routes: str | None = None) -> dict:
+                   update_routes: str | None = None, token: str | None = None,
+                   asserted_by_spec: str | None = None) -> dict:
     body = tc["body"]
     fronts, backs = extract_paths(body, backend_prefixes)
     expected = expected_keywords(body)
@@ -467,20 +497,36 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
                     if any(t in visible_text for t in terms):
                         hit_count += 1
                 notes.append(f"GOTO {path} → {hit_count}/{checkable} expected matched (visible text)")
-                # pass needs ≥30% of checkable expected bullets visible on the page
+                # A weak oracle must never veto a strong one. This check counts how many words
+                # of the Expected prose appear on the page. The better a test case gets — "the
+                # row count equals the number of live orders per GET /orders" — the fewer of
+                # its words a page can possibly show. Once a spec asserts the same test case
+                # with real assertions, the keyword score is a smoke signal, not a verdict.
                 if checkable and hit_count / checkable < 0.3:
-                    overall = "fail"
-                    notes.append(f"  only {hit_count}/{checkable} expected-keywords visible on {path} (<30%)")
+                    if asserted_by_spec:
+                        notes.append(f"  only {hit_count}/{checkable} expected-keywords visible on "
+                                     f"{path} — informational: asserted by `specs/{asserted_by_spec}`")
+                    else:
+                        overall = "fail"
+                        notes.append(f"  only {hit_count}/{checkable} expected-keywords visible on {path} (<30%)")
         except Exception as e:
             overall = "error"
             notes.append(f"GOTO {path} → exception: {str(e)[:120]}")
 
     # Backend GETs
-    with httpx.Client(cookies=cookies, timeout=10) as cli:
+    with backend_client(cookies, token) as cli:
         for method, path in backs[:5]:
             if method != "GET":
                 continue
-            full = backend.rstrip("/") + materialize_path(path, ids)
+            materialized = materialize_path(path, ids)
+            if "{" in materialized:
+                # `id_discovery` is unset or returned nothing, so `/orders/{order_id}` is being
+                # requested literally. A 404 for a URL that was never a URL is not the app
+                # failing — it is us probing a template.
+                notes.append(f"{method} {path} → skipped: unresolved placeholder "
+                             f"(set `id_discovery` in .web-qa/config.json)")
+                continue
+            full = backend.rstrip("/") + materialized
             try:
                 r = cli.request(method, full)
                 notes.append(f"{method} {path} → {r.status_code}")
@@ -512,8 +558,6 @@ def main() -> int:
     ap.add_argument("--viewport", help="named viewport from config `viewports`; "
                                        "non-default gets its own baseline set (@name suffix)")
     ap.add_argument("--scenarios", help="Glob within .web-qa/scenarios/. Default: *.md")
-    ap.add_argument("--include-mutating", action="store_true",
-                    help="Attempt to run mutating TCs (placeholder; spec-gen not implemented)")
     ap.add_argument("--update-baseline", action="store_true",
                     help="Save current screenshots as the new visual baseline (no diff this run)")
     ap.add_argument("--routes", help="glob limiting --update-baseline to matching routes "
@@ -545,8 +589,8 @@ def main() -> int:
     email, password = resolve_credentials(proj, args.email, args.password, args.role)
     cookies, user_me, token = api_login(backend, email, password, proj)
     storage = build_storage_state(cookies, target, token, proj)
-    ids = discover_ids(backend, cookies, id_discovery)
-    print(f"[run] discovered ids: {ids}", file=sys.stderr)
+    ids = discover_ids(backend, cookies, id_discovery, token)
+    emit("run", f"discovered ids: {ids}")
 
     scenarios_dir = project_path / ".web-qa" / "scenarios"
     pattern = args.scenarios or "*.md"
@@ -577,10 +621,14 @@ def main() -> int:
         page.on("console", on_console)
         page.on("response", on_response)
 
+        total_tcs = sum(len(split_tcs(sf.read_text())) for sf in scenario_files)
+        bar = Progress("run", total_tcs)
+        bar.start(f"{len(scenario_files)} scenario file(s), {total_tcs} TC"
+                  + (f", role={args.role}" if args.role else ""))
         for sf in scenario_files:
             md = sf.read_text()
             tcs = split_tcs(md)
-            print(f"[run] {sf.name}: {len(tcs)} TC", file=sys.stderr)
+            bar.note(f"{sf.name}: {len(tcs)} TC")
             for tc in tcs:
                 declared = tc_roles(tc["body"])
                 if declared and (args.role or "").lower() not in declared:
@@ -591,23 +639,24 @@ def main() -> int:
                         "notes": [f"declared for role(s): {', '.join(declared)}{hint}"],
                         "artifacts": [], "scenario_file": sf.name, "a11y_critical": [],
                     })
+                    bar.step(f"{tc['id']}  role-specific", "SKIP")
                     continue
                 kind, reasons = classify(tc["body"])
-                if kind == "mutating" and not args.include_mutating:
-                    all_results.append({
-                        "id": tc["id"], "title": tc["title"], "kind": "mutating",
-                        "status": "manual", "notes": ["skipped (mutating); reasons: " + ", ".join(reasons)],
-                        "artifacts": [], "scenario_file": sf.name, "a11y_critical": [],
-                    })
-                    continue
                 if kind == "mutating":
+                    # Not a skip you can turn off: this runner navigates and reads. Mutating
+                    # test cases are EXECUTED, as playwright specs. Saying only "manual" made
+                    # a done job look undone, so name the spec that does it — or its absence.
+                    spec = spec_for_tc(project_path / ".web-qa", tc["id"])
+                    note = (f"mutating — executed as `specs/{spec}`"
+                            if spec else
+                            "mutating — NO spec exists yet: run web-qa-spec-gen")
                     all_results.append({
                         "id": tc["id"], "title": tc["title"], "kind": "mutating",
-                        "status": "manual",
-                        "notes": ["mutating — passive runner skips it; run via specs "
-                                  "(web-qa-spec-gen + web-qa-run-specs / web-qa-matrix)"],
+                        "status": "manual", "spec": spec,
+                        "notes": [note + "; reasons: " + ", ".join(reasons)],
                         "artifacts": [], "scenario_file": sf.name, "a11y_critical": [],
                     })
+                    bar.step(f"{tc['id']}  {note}", "SPEC" if spec else "MAN")
                     continue
 
                 nf_start = len(network_fails)
@@ -615,7 +664,8 @@ def main() -> int:
                 res = run_passive_tc(tc, page, target, backend, cookies, ids, reports,
                                      baseline_dir, args.update_baseline, args.visual_threshold,
                                      backend_prefixes, route_hints, visual_masks, visual_exclude,
-                                     vp_suffix, args.routes)
+                                     vp_suffix, args.routes, token,
+                                     spec_for_tc(project_path / ".web-qa", tc["id"]))
                 # Network assertion: a 5xx during THIS TC's navigation is a failure signal,
                 # not a footnote (config `network_fail_on`, default ["5xx"] — add "4xx" to
                 # tighten). Structural, language-agnostic, same as everywhere else.
@@ -639,8 +689,12 @@ def main() -> int:
                         f"[{c['type']}] {c['text'][:100]}" for c in bad_console[:5]))
                 res["scenario_file"] = sf.name
                 all_results.append(res)
-                print(f"  {res['id']}: {res['status']} ({len(res.get('a11y_critical', []))} a11y critical)", file=sys.stderr)
+                a11y = len(res.get("a11y_critical", []))
+                bar.step(f"{res['id']}  {res['title'][:50]}"
+                         + (f"  ({a11y} a11y critical)" if a11y else ""),
+                         res["status"].upper()[:4])
 
+        bar.finish()
         browser.close()
 
     # Aggregate

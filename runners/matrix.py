@@ -31,11 +31,14 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from coverage import control_coverage
+from progress import Progress, emit
 from explore import load_project, run_fixture_cmd, viewport_entry, viewport_env
+from spec_gen import orphan_specs
 from run_scenarios import split_tcs, extract_paths, classify, tc_roles, DEFAULT_BACKEND_PREFIXES
 
 SKILL = Path(__file__).resolve().parent.parent
@@ -95,7 +98,8 @@ def spec_is_mutating(text: str, tc_kind: str | None) -> bool:
 
 def collect_specs(webqa: Path, include_adhoc: bool,
                   exclude_globs: list[str] | None = None,
-                  tc_kinds: dict[str, str] | None = None) -> tuple[list[dict], list[str]]:
+                  tc_kinds: dict[str, str] | None = None,
+                  orphans: set[str] | None = None) -> tuple[list[dict], list[str]]:
     """Returns (rows, excluded_names). exclude_globs come from config `gate_exclude` —
     specs for features hidden on prod (feature flags, build-args) don't belong in the gate.
 
@@ -114,6 +118,17 @@ def collect_specs(webqa: Path, include_adhoc: bool,
         tc_id = spec_tc_id(f.name)
         mutating = spec_is_mutating(f.read_text(encoding="utf-8", errors="ignore"),
                                     (tc_kinds or {}).get(tc_id))
+        if f.name in (orphans or set()):
+            # No test case defines it any more (a TC was deleted, or its title reworded and
+            # spec-gen wrote a new file). Running it would let a stale, unexplained spec mutate
+            # data and block the deploy gate.
+            rows.append({
+                "source": "spec", "file": f.name, "id": tc_id, "title": f.stem,
+                "kind": "orphan", "mutating": mutating, "status": "manual",
+                "skipped_mutating": True,
+                "note": "orphan: no test case defines this spec (web-qa-spec-gen --prune)",
+            })
+            continue
         rows.append({
             "source": "spec", "file": f.name, "id": tc_id, "title": f.stem,
             "kind": ("adhoc" if adhoc else "spec") + (" (mutating)" if mutating else ""),
@@ -179,14 +194,17 @@ def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = 
         # the single default combo owns the run folder; role/viewport combos get a subfolder
         combo = "-".join(filter(None, [role, viewport]))
         cmd += ["--reports-dir", str(run_dir / combo if combo else run_dir)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    # stdout is captured (its last line is the summary JSON); stderr is INHERITED so the
+    # child's own `[run] 12/59 · …` progress reaches the terminal live. Capturing both meant
+    # a multi-minute stage per role printed nothing at all until it was over.
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, timeout=3600)
     try:
         data = json.loads(proc.stdout.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError):
         for r in scenario_rows:
             r["status"] = "error"
             r["note"] = "passive runner crashed"
-        print(f"[matrix] passive runner failed:\n{proc.stderr[-1500:]}", file=sys.stderr)
+        emit("matrix", f"passive runner failed (exit {proc.returncode}); its stderr is above")
         return None
     results = json.loads((Path(data["report"]).parent / "results.json").read_text())["results"]
     by_key = {(r["scenario_file"], r["id"]): r for r in results}
@@ -196,6 +214,33 @@ def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = 
             row["status"] = res["status"]
             row["note"] = " · ".join(res.get("notes", []))[:160]
     return data["report"]
+
+
+# The `line` reporter rewrites one terminal line, so every progress line arrives prefixed
+# with cursor-control escapes (`ESC[1A ESC[2K`). Matching at `^` therefore matched nothing —
+# the specs stage printed its header and then went silent for the whole run.
+RE_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+RE_PW_LINE = re.compile(r"\[(\d+)/(\d+)\]\s+\[[^\]]+\]\s+›\s+(\S+?):\d+:\d+\s+›\s*(.*)$")
+RE_PW_FAIL = re.compile(r"^\s*\d+\)\s+\[[^\]]+\]\s+›\s+(\S+?):\d+:\d+\s+›\s*(.*)$")
+
+
+def _pump_playwright(stream, log, bar: "Progress") -> None:
+    """Everything playwright says goes to the log; only progress and failures reach the
+    terminal. Raw playwright output is a wall of stack traces — the point of a progress line
+    is that a human can read it while the run is going."""
+    for line in stream:
+        log.write(line)
+        log.flush()
+        clean = RE_ANSI.sub("", line).rstrip()
+        m = RE_PW_LINE.search(clean)
+        if m:
+            i, _n, spec, title = m.groups()
+            bar.done = int(i) - 1                    # playwright owns the counter
+            bar.step(f"{Path(spec).name}  {title[:70]}", "RUN")
+            continue
+        m = RE_PW_FAIL.match(clean)
+        if m:
+            bar.note(f"FAIL {Path(m.group(1)).name}  {m.group(2)[:70]}")
 
 
 def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: int | None = None,
@@ -222,17 +267,21 @@ def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: 
         env["WEBQA_VIEWPORT"] = viewport  # picked up by playwright.config.template.ts
     if mobile_device:
         env["WEBQA_MOBILE_DEVICE"] = mobile_device  # adds a `mobile` project in the template config
-    # json → file via env; line-reporter → live progress in playwright.log (tail -f to watch)
+    # json → file via env; line-reporter → progress. The log used to be the ONLY place that
+    # progress appeared, so a 40-minute specs stage looked like a hung process.
     cmd = ["npx", "playwright", "test", "--reporter=line,json"]
     if workers:
         cmd.append(f"--workers={workers}")
-    print(f"[matrix] playwright progress: tail -f {log_path}", file=sys.stderr)
+    bar = Progress("specs", len(to_run))
+    bar.start(f"{len(to_run)} spec file(s) via playwright — full log: {log_path}")
     # Own process group: on timeout we kill the WHOLE tree (npx → node workers → chromium),
     # otherwise browsers orphan and keep running after the runner dies.
     with open(log_path, "w") as log:
         proc = subprocess.Popen([*cmd, *files], cwd=webqa, env=env,
-                                stdout=log, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1, start_new_session=True)
+        pump = threading.Thread(target=_pump_playwright, args=(proc.stdout, log, bar), daemon=True)
+        pump.start()
         try:
             rc = proc.wait(timeout=3600)
             exit_note = f"exit {rc}"
@@ -244,12 +293,14 @@ def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: 
                 pass
             proc.wait()
             exit_note = "stage timeout (3600s), playwright process group killed"
+        pump.join(timeout=10)
+    bar.finish(exit_note)
     if not out_json.is_file():
         tail = log_path.read_text()[-1500:] if log_path.is_file() else ""
         for r in to_run:
             r["status"] = "error"
             r["note"] = f"playwright produced no report ({exit_note})"
-        print(f"[matrix] playwright failed ({exit_note}):\n{tail}", file=sys.stderr)
+        emit("matrix", f"playwright failed ({exit_note}):\n{tail}")
         return
 
     # Walk the suite tree; playwright test.status: expected|unexpected|skipped|flaky
@@ -392,6 +443,40 @@ def update_history(webqa: Path, run_id: str, rows: list[dict],
 
 # ---------- report ----------
 
+def fold_mutating_into_specs(scenario_rows: list[dict],
+                             spec_rows: list[dict]) -> tuple[list[dict], int]:
+    """One executed test, one row.
+
+    The passive runner cannot mutate; a mutating test case is EXECUTED by its spec. Emitting a
+    scenario row for it too — once per role, none of them running anything — put the same test
+    case in the matrix four times and reported the three copies as `✋ manual`. Work that was
+    done looked undone.
+
+    So a mutating TC that has a spec keeps no scenario row at all: the spec row already carries
+    its id, its kind and its real verdict. A mutating TC with NO spec keeps exactly one row,
+    honestly `manual`, because nothing executed it. Passive TCs are untouched — when they also
+    have a spec, the two rows are two different checks (a11y/visual/heuristic vs. asserted)."""
+    has_spec = {r["id"] for r in spec_rows if r["id"]}
+    kept: list[dict] = []
+    seen_specless: set[str] = set()
+    folded = 0
+    for row in scenario_rows:
+        if row.get("kind") != "mutating":
+            kept.append(row)
+            continue
+        if row["id"] in has_spec:
+            folded += 1
+            continue
+        if row["id"] in seen_specless:      # same TC across role combos: one row is enough
+            folded += 1
+            continue
+        seen_specless.add(row["id"])
+        row["role"] = "-"
+        row["note"] = "mutating, and no spec exists: nothing executed it (web-qa-spec-gen)"
+        kept.append(row)
+    return kept, folded
+
+
 def render_junit_xml(alias: str, run_id: str, rows: list[dict],
                      quarantined: set[str] = frozenset()) -> str:
     """Matrix rows as JUnit XML — the lingua franca of CI test reporting. One testcase
@@ -526,8 +611,11 @@ def main() -> int:
         None,
     )
     tc_kinds = {r["id"]: r["kind"] for r in collect_scenario_tcs(webqa, backend_prefixes)}
+    orphans = set(orphan_specs(webqa))
+    if orphans:
+        emit("matrix", f"{len(orphans)} orphan spec(s) reported and NOT run (no test case defines them): {', '.join(sorted(orphans)[:5])}{'…' if len(orphans) > 5 else ''}")
     spec_rows, gate_excluded = collect_specs(webqa, args.include_adhoc,
-                                             proj.get("gate_exclude") or [], tc_kinds)
+                                             proj.get("gate_exclude") or [], tc_kinds, orphans)
     for r in spec_rows:
         r["role"] = "-"
         if args.no_mutations and r.get("mutating"):
@@ -536,8 +624,7 @@ def main() -> int:
             r["note"] = "skipped (mutating spec); --no-mutations"
     mutating_specs = sum(1 for r in spec_rows if r.get("mutating"))
     if mutating_specs and not args.no_mutations and not args.skip_specs:
-        print(f"[matrix] {mutating_specs} of {len(spec_rows)} spec(s) WRITE to the app's data "
-              f"(pass --no-mutations for a read-only run)", file=sys.stderr)
+        emit("matrix", f"{mutating_specs} of {len(spec_rows)} spec(s) WRITE to the app's data (pass --no-mutations for a read-only run)")
     # role-annotated TCs whose declared roles are outside --roles must not vanish silently —
     # surface them as skip rows so the inventory stays complete
     requested = {(r or "").lower() for r in roles if r}
@@ -547,10 +634,15 @@ def main() -> int:
                 r.update(role=",".join(r["roles"]), viewport="-", status="skip",
                          note="declared roles not included in --roles")
                 scenario_rows.append(r)
-    rows = scenario_rows + spec_rows
+    # Coverage is computed from the full scenario list below; the matrix DISPLAYS one row per
+    # executed test, so a mutating TC lives in its spec's row, not in a duplicate of its own.
+    displayed_scenarios, folded = fold_mutating_into_specs(scenario_rows, spec_rows) \
+        if not args.skip_specs else (scenario_rows, 0)
+    if folded:
+        emit("matrix", f"{folded} mutating scenario row(s) folded into the specs that execute them")
+    rows = displayed_scenarios + spec_rows
     if gate_excluded:
-        print(f"[matrix] gate_exclude skipped {len(gate_excluded)} spec(s): "
-              f"{', '.join(gate_excluded[:6])}{'…' if len(gate_excluded) > 6 else ''}", file=sys.stderr)
+        emit("matrix", f"gate_exclude skipped {len(gate_excluded)} spec(s): {', '.join(gate_excluded[:6])}{'…' if len(gate_excluded) > 6 else ''}")
     if not rows:
         print(json.dumps({"error": f"no tests found in {webqa}"}), file=sys.stderr)
         return 2
@@ -573,103 +665,106 @@ def main() -> int:
     if not args.no_fixtures:
         run_fixture_cmd(proj)
 
-    run_id = now_run_id()
-    # one run, one folder: matrix artifacts at the top, each passive combo nested below
-    run_dir = webqa / "reports" / run_id
-    matrix_dir = run_dir / "matrix"
-    matrix_dir.mkdir(parents=True, exist_ok=True)
-    matrix_md = matrix_dir / "matrix.md"
-    artifacts_dir = run_dir / "test-results"
-    passive_reports: list[str] = []
-    # What produced this report. Absent it, nobody — including the next reader of the
-    # matrix — can tell whether the run skipped the passive stage, ran two workers, or
-    # mutated the database. The stats alone cannot answer any of that.
-    invocation = {
-        "argv": sys.argv,
-        "cwd": os.getcwd(),
-        "flags": {k: v for k, v in sorted(vars(args).items()) if v not in (None, False)},
-        "env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("WEBQA_")},
-    }
-    artifacts: dict = {}
+    # Teardown must survive a Ctrl-C and a crash. Two killed runs left QA- entities behind,
+    # and the next run's `POST /shipments` came back 409 Conflict on a duplicate it had
+    # created itself — read, at first, as the application being broken.
+    try:
+        run_id = now_run_id()
+        # one run, one folder: matrix artifacts at the top, each passive combo nested below
+        run_dir = webqa / "reports" / run_id
+        matrix_dir = run_dir / "matrix"
+        matrix_dir.mkdir(parents=True, exist_ok=True)
+        matrix_md = matrix_dir / "matrix.md"
+        artifacts_dir = run_dir / "test-results"
+        passive_reports: list[str] = []
+        # What produced this report. Absent it, nobody — including the next reader of the
+        # matrix — can tell whether the run skipped the passive stage, ran two workers, or
+        # mutated the database. The stats alone cannot answer any of that.
+        invocation = {
+            "argv": sys.argv,
+            "cwd": os.getcwd(),
+            "flags": {k: v for k, v in sorted(vars(args).items()) if v not in (None, False)},
+            "env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("WEBQA_")},
+        }
+        artifacts: dict = {}
 
-    def snapshot(stage: str, flaky_keys: set[str] = frozenset(),
-                 quarantined: set[str] = frozenset()) -> tuple[dict, bool]:
-        """Persist matrix.md/json NOW. Called before and after every stage so a killed
-        or hung run still leaves a durable partial report on disk. Quarantined rows still
-        run and report, but their fail/error does not block the gate."""
-        stats: dict[str, int] = {}
-        for r in rows:
-            stats[r["status"]] = stats.get(r["status"], 0) + 1
-        gate_ok = not any(r["status"] in GATE_BLOCKING and row_key(r) not in quarantined
-                          for r in rows)
-        matrix_md.write_text(render_matrix_md(proj["alias"], run_id, rows, stats, gate_ok,
-                                              coverage, flaky_keys, role_coverage, quarantined,
-                                              control_gaps))
-        (matrix_dir / "matrix.json").write_text(json.dumps({
-            "run_id": run_id, "alias": proj["alias"], "stage": stage, "gate_ok": gate_ok,
-            "invocation": invocation, "artifacts": artifacts,
-            "mutating_specs_run": 0 if args.no_mutations or args.skip_specs else mutating_specs,
-            "stats": stats, "coverage": coverage, "role_coverage": role_coverage,
-            "uncovered_controls": control_gaps,
-            "flaky": sorted(flaky_keys), "quarantined": sorted(quarantined),
-            "gate_excluded": gate_excluded,
-            "roles": [r or "default" for r in roles],
-            "viewports": [v or "default" for v in viewports],
-            "passive_reports": passive_reports, "rows": rows,
-        }, ensure_ascii=False, indent=2))
-        return stats, gate_ok
+        def snapshot(stage: str, flaky_keys: set[str] = frozenset(),
+                     quarantined: set[str] = frozenset()) -> tuple[dict, bool]:
+            """Persist matrix.md/json NOW. Called before and after every stage so a killed
+            or hung run still leaves a durable partial report on disk. Quarantined rows still
+            run and report, but their fail/error does not block the gate."""
+            stats: dict[str, int] = {}
+            for r in rows:
+                stats[r["status"]] = stats.get(r["status"], 0) + 1
+            gate_ok = not any(r["status"] in GATE_BLOCKING and row_key(r) not in quarantined
+                              for r in rows)
+            matrix_md.write_text(render_matrix_md(proj["alias"], run_id, rows, stats, gate_ok,
+                                                  coverage, flaky_keys, role_coverage, quarantined,
+                                                  control_gaps))
+            (matrix_dir / "matrix.json").write_text(json.dumps({
+                "run_id": run_id, "alias": proj["alias"], "stage": stage, "gate_ok": gate_ok,
+                "invocation": invocation, "artifacts": artifacts,
+                "mutating_specs_run": 0 if args.no_mutations or args.skip_specs else mutating_specs,
+                "orphan_specs": sorted(orphans),
+                "stats": stats, "coverage": coverage, "role_coverage": role_coverage,
+                "uncovered_controls": control_gaps,
+                "flaky": sorted(flaky_keys), "quarantined": sorted(quarantined),
+                "gate_excluded": gate_excluded,
+                "roles": [r or "default" for r in roles],
+                "viewports": [v or "default" for v in viewports],
+                "passive_reports": passive_reports, "rows": rows,
+            }, ensure_ascii=False, indent=2))
+            return stats, gate_ok
 
-    snapshot("inventory")  # durable from second zero, statuses filled in as stages finish
-    if scenario_rows and not args.skip_passive:
-        for role, vp, rws in combo_sets:
-            label = "".join([f" (role {role})" if role else "", f" (viewport {vp})" if vp else ""])
-            print(f"[matrix] passive stage{label}: {len(rws)} TC", file=sys.stderr)
-            rep = run_passive_stage(args.alias, rws, role, vp, run_dir=run_dir)
-            if rep:
-                passive_reports.append(rep)
-            snapshot(f"passive{label}")
-    if spec_rows and not args.skip_specs:
-        runnable = sum(1 for r in spec_rows if not r.get("skipped_mutating"))
-        print(f"[matrix] specs stage: {runnable} of {len(spec_rows)} spec files", file=sys.stderr)
-        # CLI --workers > config `workers` (small dev stands want 1: parallel chromiums
-        # against one dev server turn timing into noise) > template default
-        run_specs_stage(webqa, spec_rows, matrix_dir, args.workers or proj.get("workers"),
-                        viewport_env(proj), mobile_device, artifacts_dir)
-        artifacts.update(artifact_stats(artifacts_dir))
-        if artifacts:
-            print(f"[matrix] failure artifacts → {artifacts_dir} "
-                  f"({artifacts['files']} files, {artifacts['bytes'] // 1024} KB)", file=sys.stderr)
-        snapshot("specs")
+        snapshot("inventory")  # durable from second zero, statuses filled in as stages finish
+        if scenario_rows and not args.skip_passive:
+            for role, vp, rws in combo_sets:
+                label = "".join([f" (role {role})" if role else "", f" (viewport {vp})" if vp else ""])
+                emit("matrix", f"passive stage{label}: {len(rws)} TC")
+                rep = run_passive_stage(args.alias, rws, role, vp, run_dir=run_dir)
+                if rep:
+                    passive_reports.append(rep)
+                snapshot(f"passive{label}")
+        if spec_rows and not args.skip_specs:
+            runnable = sum(1 for r in spec_rows if not r.get("skipped_mutating"))
+            emit("matrix", f"specs stage: {runnable} of {len(spec_rows)} spec files")
+            # CLI --workers > config `workers` (small dev stands want 1: parallel chromiums
+            # against one dev server turn timing into noise) > template default
+            run_specs_stage(webqa, spec_rows, matrix_dir, args.workers or proj.get("workers"),
+                            viewport_env(proj), mobile_device, artifacts_dir)
+            artifacts.update(artifact_stats(artifacts_dir))
+            if artifacts:
+                emit("matrix", f"failure artifacts → {artifacts_dir} ({artifacts['files']} files, {artifacts['bytes'] // 1024} KB)")
+            snapshot("specs")
 
-    keep = args.keep_artifacts if args.keep_artifacts is not None else \
-        int(proj.get("keep_artifacts", DEFAULT_KEEP_ARTIFACTS))
-    pruned = prune_artifacts(webqa, keep)
-    if pruned:
-        print(f"[matrix] pruned test-results of {len(pruned)} older run(s), kept {keep}",
-              file=sys.stderr)
+        keep = args.keep_artifacts if args.keep_artifacts is not None else \
+            int(proj.get("keep_artifacts", DEFAULT_KEEP_ARTIFACTS))
+        pruned = prune_artifacts(webqa, keep)
+        if pruned:
+            emit("matrix", f"pruned test-results of {len(pruned)} older run(s), kept {keep}")
 
-    q_window = int(proj.get("quarantine_after") or 0)
-    flaky_keys, quarantined = update_history(webqa, run_id, rows, q_window)
-    stats, gate_ok = snapshot("final", flaky_keys, quarantined)
+        q_window = int(proj.get("quarantine_after") or 0)
+        flaky_keys, quarantined = update_history(webqa, run_id, rows, q_window)
+        stats, gate_ok = snapshot("final", flaky_keys, quarantined)
 
-    if args.junit:
-        junit_path = Path(args.junit)
-        junit_path.parent.mkdir(parents=True, exist_ok=True)
-        junit_path.write_text(render_junit_xml(proj["alias"], run_id, rows, quarantined))
-        print(f"[matrix] junit → {junit_path}", file=sys.stderr)
+        if args.junit:
+            junit_path = Path(args.junit)
+            junit_path.parent.mkdir(parents=True, exist_ok=True)
+            junit_path.write_text(render_junit_xml(proj["alias"], run_id, rows, quarantined))
+            emit("matrix", f"junit → {junit_path}")
 
-    # Zero-config CI summary: inside GitHub Actions the matrix lands on the run page
-    gss = os.environ.get("GITHUB_STEP_SUMMARY")
-    if gss:
-        with open(gss, "a", encoding="utf-8") as f:
-            f.write("\n" + matrix_md.read_text(encoding="utf-8"))
+        # Zero-config CI summary: inside GitHub Actions the matrix lands on the run page
+        gss = os.environ.get("GITHUB_STEP_SUMMARY")
+        if gss:
+            with open(gss, "a", encoding="utf-8") as f:
+                f.write("\n" + matrix_md.read_text(encoding="utf-8"))
 
-    if not args.no_fixtures:
-        run_fixture_cmd(proj, teardown=True)
-
-    print(json.dumps({"run_id": run_id, "gate_ok": gate_ok, "stats": stats,
-                      "total": len(rows), "matrix": str(matrix_md)}, ensure_ascii=False))
-    return 0 if gate_ok else 1
+        print(json.dumps({"run_id": run_id, "gate_ok": gate_ok, "stats": stats,
+                          "total": len(rows), "matrix": str(matrix_md)}, ensure_ascii=False))
+        return 0 if gate_ok else 1
+    finally:
+        if not args.no_fixtures:
+            run_fixture_cmd(proj, teardown=True)
 
 
 if __name__ == "__main__":

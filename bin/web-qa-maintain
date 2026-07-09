@@ -4,4 +4,4 @@
 # Usage: web-qa-maintain --alias <name> [--report <json>] [--apply] [--workers N]
 set -e
 SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
-exec uv run --project "$SKILL" python "$SKILL/runners/maintain.py" "$@"
+exec uv run --project "$SKILL" python -u "$SKILL/runners/maintain.py" "$@"

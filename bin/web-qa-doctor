@@ -4,4 +4,4 @@
 # Usage: web-qa-doctor [--alias <name>] [--json]
 set -e
 SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
-exec uv run --project "$SKILL" python "$SKILL/runners/doctor.py" "$@"
+exec uv run --project "$SKILL" python -u "$SKILL/runners/doctor.py" "$@"

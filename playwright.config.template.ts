@@ -50,7 +50,10 @@ export default defineConfig({
     // exceeded." with no locator, no step, nothing. Bounding the ACTION instead
     // turns the same failure into "locator not found: getByLabel(/Price/i)".
     actionTimeout: 10_000,
-    navigationTimeout: 15_000,
+    // 30s, not 15s: a dev server compiles a route on its first request, and under a serial
+    // 70-spec run that cold compile regularly crosses 15s. A genuinely hung navigation still
+    // dies on the whole-test budget above, so nothing is lost but false failures.
+    navigationTimeout: 30_000,
     // CI: trace on retry only; locally there are no retries — keep traces for failures
     trace: process.env.CI ? 'on-first-retry' : 'retain-on-failure',
     screenshot: 'only-on-failure',

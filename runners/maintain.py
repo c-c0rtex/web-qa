@@ -28,10 +28,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, viewport_env
+from progress import Progress, emit
 from run_scenarios import norm_route
 from spec_gen import (DEFAULT_MAX_USD, apply_project_budget, call_claude, llm_spend,
-                      load_app_context, load_seed,
-                      postprocess_spec, seed_prompt_section, validate_spec)
+                      load_app_context, load_seed, postprocess_spec,
+                      seed_prompt_section, spend_probe, validate_spec)
 
 # `await page.goto(`${APP}/orders/${id}`)` → /orders/${id}; also plain '/orders'
 RE_SPEC_GOTO = re.compile(r"""goto\(\s*[`'"]([^`'"]*)""")
@@ -96,6 +97,17 @@ Rules for case (a):
 - The PAGE STATE AT FAILURE below (when present) is the real DOM: take roles and accessible
   names from it. An element it shows with no accessible name cannot be reached by
   `getByLabel` / `getByRole(name)` at all — locate it structurally
+- The APP MAP contains a modal's DOM only when the crawl ran `--interactive`; otherwise it can
+  neither confirm nor deny that the modal's fields have labels. The failure context always
+  can, and usually shows a bare `- textbox` under a separate `- text: Title` node.
+  `getByRole('dialog').getByLabel(...)` is the classic failing shape; replace it with a
+  structural locator inside the dialog:
+  `getByRole('dialog').getByRole('textbox').nth(i)` or `locator('input:near(:text("Title"))')`.
+  There is NO `.near()` method on a Locator — `:near()` is a selector string
+- In an ARIA snapshot `- role "Name"` is an accessible NAME; `- role: text` is a VALUE and the
+  element has no name. A `getByRole(role, {{ name }})` built from a `: value` never matches
+- A spec that navigates to a hardcoded entity id is asserting a database, not a page. If the
+  failure is "heading /Order 48/ not visible", fetch the collection and use an id that exists
 - NEVER use `waitForLoadState('networkidle')` (SPAs with polling never go idle) — replace it with
   web-first assertions (`await expect(locator).toBeVisible()`), `page.waitForURL(...)`, or
   `waitForLoadState('domcontentloaded')`
@@ -427,7 +439,7 @@ def main() -> int:
     else:
         report_path = webqa / "reports" / "maintain-playwright-results.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        print("[maintain] running playwright to collect failures…", file=sys.stderr)
+        emit("maintain", "running playwright to collect failures…")
         run_playwright_json(webqa, report_path, args.pw_workers or proj.get("workers"),
                             viewport_env(proj), webqa / "reports" / "test-results")
     if not report_path.is_file():
@@ -447,16 +459,15 @@ def main() -> int:
     else:
         artifacts_dir = artifacts_for_report(webqa, report_path)
     if artifacts_dir:
-        print(f"[maintain] failure artifacts: {artifacts_dir}", file=sys.stderr)
+        emit("maintain", f"failure artifacts: {artifacts_dir}")
     else:
-        print("[maintain] no failure artifacts found — healing from error text alone",
-              file=sys.stderr)
+        emit("maintain", "no failure artifacts found — healing from error text alone")
     # Fallback for a spec whose routes we cannot read; heal_one re-slices per spec when it can.
     app_context = load_app_context(proj_dir, include_aria=False)
     seed_section = seed_prompt_section(load_seed(proj_dir))
     summary = {"healed": [], "transient": [], "app_bugs": [], "errors": [], "probe_warnings": [],
                "mode": "apply" if args.apply else "propose"}
-    print(f"[maintain] {len(fails)} failing spec(s), {args.workers} workers", file=sys.stderr)
+    emit("maintain", f"{len(fails)} failing spec(s), {args.workers} workers")
 
     # Deterministic-first: classify flake/transient WITHOUT the LLM before spending a heal.
     #  1. a network/infra/rate-limit signature in the failure = env hiccup → transient
@@ -467,15 +478,27 @@ def main() -> int:
         sig = transient_signature(errors)
         if sig:
             summary["transient"].append({"spec": fname, "reason": sig, "source": "signature"})
-            print(f"[maintain] TRANSIENT {fname}: signature '{sig}' (spec untouched — rerun)", file=sys.stderr)
+            emit("maintain", f"TRANSIENT {fname}: signature '{sig}' (spec untouched — rerun)")
             continue
         if args.reruns and (specs_dir / fname).is_file() and rerun_is_flaky(
                 webqa, fname, args.reruns, args.pw_workers or proj.get("workers"), viewport_env(proj)):
             summary["transient"].append({"spec": fname, "reason": f"passed on re-run (×{args.reruns})",
                                          "source": "rerun"})
-            print(f"[maintain] TRANSIENT {fname}: passed on re-run — flake, not healed", file=sys.stderr)
+            emit("maintain", f"TRANSIENT {fname}: passed on re-run — flake, not healed")
             continue
         to_heal[fname] = errors
+
+    bar = Progress("maintain", len(to_heal), spend_probe)
+    bar.start(f"{len(to_heal)} spec(s) to heal, {args.workers} worker(s), "
+              f"mode={'apply' if args.apply else 'propose'}")
+
+    def _heal(spec_path, errors):
+        bar.begin(spec_path.name)
+        try:
+            return heal_one(spec_path, errors, app_context, webqa, args.apply,
+                            seed_section, proj, artifacts_dir)
+        finally:
+            bar.leave()
 
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
         futures = {}
@@ -484,27 +507,28 @@ def main() -> int:
             if not spec_path.is_file():
                 summary["errors"].append({"spec": fname, "error": "spec file not found"})
                 continue
-            futures[pool.submit(heal_one, spec_path, errors, app_context, webqa, args.apply,
-                                seed_section, proj, artifacts_dir)] = fname
+            futures[pool.submit(_heal, spec_path, errors)] = fname
         for fut in as_completed(futures):
             name, out_file, err, kind, detail, probe_warning = fut.result()
             if probe_warning:
                 summary["probe_warnings"].append({"spec": name, "warning": probe_warning})
-                print(f"[maintain] PROBE {name}: healed spec has unresolved locators\n{probe_warning}",
-                      file=sys.stderr)
+                bar.note(f"PROBE {name}: healed spec has unresolved locators\n{probe_warning}")
             if err:
                 summary["errors"].append({"spec": name, "error": err})
-                print(f"[maintain] FAIL {name}: {err[:200]}", file=sys.stderr)
+                bar.step(f"{name}: {err[:120]}", "FAIL")
             elif kind == "transient":
                 summary["transient"].append({"spec": name, "reason": detail})
-                print(f"[maintain] TRANSIENT {name}: {detail[:120]} (spec untouched — rerun)", file=sys.stderr)
+                bar.step(f"{name}: {detail[:100]} (untouched — rerun)", "ENV")
             elif kind == "app-bug":
                 summary["app_bugs"].append({"spec": name, "bug": detail, "out": out_file})
                 record_app_bug(proj_dir, name, detail)
-                print(f"[maintain] APP-BUG {name}: {detail[:120]} → test.fixme + BUGS.md", file=sys.stderr)
+                bar.step(f"{name}: {detail[:100]} → test.fixme + BUGS.md", "BUG")
             else:
                 summary["healed"].append({"spec": name, "out": out_file})
-                print(f"[maintain] OK   {name} → {out_file}", file=sys.stderr)
+                bar.step(f"{name} → {Path(out_file).name}", "OK")
+
+    bar.finish(f"{len(summary['healed'])} healed, {len(summary['app_bugs'])} app-bug(s), "
+               f"{len(summary['transient'])} transient")
 
     if args.with_screens:
         summary["screens"] = {fname: failure_artifacts(webqa, fname, artifacts_dir)["screens"]

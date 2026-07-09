@@ -6,6 +6,72 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.4.8 (a long run should say where it is, and a weak oracle should not veto a strong one)
+
+The first complete matrix run over a real app reported 113 failures. Four were candidate
+application bugs. Everything else was this tool measuring the wrong thing, or measuring it
+without saying so.
+
+**A run you can watch.** Every runner now prints one line per unit of work — where it is, how
+long it has taken, how much it has cost:
+
+```
+[gen] 14/72 · 4m12s · $3.84/$25.00 · OK   admin::TC-ADM7
+```
+
+- progress goes to **stderr**, which is line-buffered; several runners printed it on stdout,
+  where a `> run.log` swallowed it in 8 KB blocks and the terminal showed nothing for minutes.
+  `bin/*` now run `python -u`
+- a worker announces a job when it **picks it up**, not only when it finishes: with two workers
+  the completion lines alone made a parallel run look serial. The in-flight counter decrements
+  in the worker, or a pool thread that grabs its next job before the main thread harvests the
+  last one reports "3 in flight" for 2 workers
+- `matrix` streams playwright's own progress instead of hiding it in a log file, and stops
+  capturing the passive runner's stderr — a multi-minute stage per role printed nothing at all
+- a RETRY names itself and its price. A probe retry that then succeeded printed nothing, so a
+  run whose specs cost $0.25 each was quietly billed $0.31
+
+**A weak oracle no longer vetoes a strong one.** The passive runner scores how many words of a
+test case's Expected prose appear on the page. The better a test case gets — "the row count
+equals the number of live orders per GET `/orders`" — the fewer of its words a page can show.
+55 of 58 passive failures were that. When a spec asserts the same test case, the keyword score
+is now a note; `fail` is reserved for test cases nothing else executes. a11y, visual, console
+and network checks are untouched, and remain the reason that stage exists.
+
+**One executed test, one row.** A mutating test case is executed by its spec; the passive
+runner cannot mutate. Emitting a scenario row for it too — once per role, none of them running
+anything — put the same test case in the matrix four times and called three of them
+`✋ manual`. 87 rows of work that was done, reported as work that was not.
+
+**The tool stopped asking the model to invent what it could measure:**
+
+- `run_scenarios` sent cookies and no bearer token, so every backend endpoint a test case
+  documents answered 401 — 71 of them across three roles — and each was reported as the test
+  case failing. It also probed `/orders/{order_id}` literally when `id_discovery` is unset;
+  a 404 for a URL that was never a URL is not the app failing
+- query parameters now carry their **bounds**: `size:integer[1..200]=50`. A spec asked for
+  `?size=500` and read the 422 as the app being broken
+- `explore --interactive` **opens dialogs and snapshots them**. Modals are not routes and
+  nothing links to them, so the map said nothing about them; the rule "an element with no
+  accessible name cannot be found by `getByLabel`" could never fire, because there was no
+  element to look at. Six specs hung ten seconds each on `getByRole('dialog').getByLabel(…)`.
+  The interactive pass also stopped clicking a hamburger menu and then failing every later
+  click on the overlay it had opened — which is why it had never discovered anything
+- axe's findings reach the generator's prompt. Two stages of this tool knew the app has 46
+  buttons with no accessible name and 18 unlabeled fields; neither told the other
+- the fixture rule distinguishes a file the app **stores** from a file it **parses**.
+  `Buffer.from('%PDF-1.4 test content')` is not a PDF; an importer rejects it, and the spec
+  fails against a correct app. Available fixtures are listed in the prompt
+- new rules, each earned by a real failure: a redirect is not instant (`page.url()` read after
+  `domcontentloaded` sees the URL you asked for, not the one the guard sent you to); a bare
+  `object` response shape is genuinely untyped, so do not assume a key
+- `matrix` runs the fixture teardown in a `finally`. Two killed runs left `QA-` entities
+  behind, and the next run's `POST /shipments` came back 409 Conflict on a duplicate it had
+  created itself
+- `navigationTimeout` is 30 s: a dev server compiles a route on its first request, and under a
+  serial 70-spec run that cold compile crosses 15 s. Zero bare `Test timeout` messages remain —
+  every one of 30 timeouts names its locator
+
 ## Shipped — v0.4.7 (a covered route is not a tested route)
 
 Everything here was found by generating one spec with the v0.4.6 prompt and running it

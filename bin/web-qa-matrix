@@ -4,4 +4,4 @@
 # Usage: web-qa-matrix --alias <name> [--list] [--include-adhoc] [--skip-passive|--skip-specs]
 set -e
 SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
-exec uv run --project "$SKILL" python "$SKILL/runners/matrix.py" "$@"
+exec uv run --project "$SKILL" python -u "$SKILL/runners/matrix.py" "$@"

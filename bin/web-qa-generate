@@ -3,4 +3,4 @@
 # Usage: web-qa-generate --alias <name> (--diff <ref> | --task "...") [--out f.md] [--prefix X] [--force]
 set -e
 SKILL="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
-exec uv run --project "$SKILL" python "$SKILL/runners/gen_scenarios.py" "$@"
+exec uv run --project "$SKILL" python -u "$SKILL/runners/gen_scenarios.py" "$@"

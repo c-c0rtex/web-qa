@@ -580,13 +580,8 @@ def test_postprocess_downgrades_networkidle():
 
 
 def test_prompt_format_survives_braces_in_values():
-    p = PROMPT_TEMPLATE.format(
-        stack="s", frontend_url="f", backend_url="b", login_email="e", login_password="p",
-        test_data_prefix="QA-", test_timeout_ms=60000,
-        auth_login_hint="use `Bearer ${access_token}` and {email, password}",
-        seed_section="```ts\nconst t = `x${y}`;\n```",
-        app_context="ctx", dnd_section="", tc_body="## TC-1 — t",
-    )
+    p = _prompt(auth_login_hint="use `Bearer ${access_token}` and {email, password}",
+                seed_section="```ts\nconst t = `x${y}`;\n```")
     assert "Bearer ${access_token}" in p and "{email, password}" in p
 
 
@@ -1483,20 +1478,16 @@ def test_shipped_template_declares_a_budget_longer_than_a_slow_upload():
 
 
 def test_prompt_states_the_budget_and_the_rules_that_earned_it():
-    from spec_gen import PROMPT_TEMPLATE
-    p = PROMPT_TEMPLATE.format(
-        stack="next", frontend_url="http://f", backend_url="http://b", login_email="e@x",
-        login_password="pw", test_timeout_ms=60000, seed_section="", app_context="MAP",
-        dnd_section="", test_data_prefix="QA-", auth_login_hint="hint", tc_body="TC")
+    p = _prompt()
     assert "60000 ms" in p                                   # the budget is stated, not implied
     assert "waitForTimeout" in p
     assert "OPEN THE PAGE FIRST" in p                        # else the screenshot is about:blank
     assert "Never invent an email" in p
-    assert "Never reference a file path that you have not created" in p
+    assert "Never reference a path you neither created nor were shown" in p
     assert "SECOND UNVERIFIED" in p                          # the re-implementation warning
     assert "DRILL-DOWN / ROUND-TRIP (preferred)" in p
     assert "NO accessible name" in p                         # unlabeled inputs
-    assert "combobox` is not `getByRole('button')" in p
+    assert "is not a `button`" in p
 
 
 def test_slice_aria_bounds_the_prompt_even_with_whole_page_snapshots():
@@ -1908,11 +1899,7 @@ def test_prompts_warn_about_the_three_ways_a_correct_app_still_goes_red():
     came back percent-encoded with an app-appended `&loaded=10`; and money is grouped with
     non-breaking spaces."""
     from maintain import FIX_PROMPT
-    from spec_gen import PROMPT_TEMPLATE
-    p = PROMPT_TEMPLATE.format(
-        stack="next", frontend_url="http://f", backend_url="http://b", login_email="e@x",
-        login_password="pw", test_timeout_ms=60000, seed_section="", app_context="MAP",
-        dnd_section="", test_data_prefix="QA-", auth_login_hint="hint", tc_body="TC")
+    p = _prompt()
     for text in (p, FIX_PROMPT):
         assert "text-transform" in text
         assert "percent-encoded" in text.lower() or "PERCENT-ENCODED" in text
@@ -2013,3 +2000,572 @@ def test_every_money_spending_runner_can_be_capped_from_the_command_line():
         src = inspect.getsource(mod.main)
         assert '"--max-usd"' in src, mod.__name__
         assert 'os.environ["WEBQA_MAX_USD"] = str(args.max_usd)' in src, mod.__name__
+
+
+# ---------------------------------------------------------------------------
+# The cache was written once, after the whole fan-out. Killing a 70-spec run at
+# the 69th lost every entry, and the next invocation paid for all of them again.
+# ---------------------------------------------------------------------------
+
+def test_cache_is_saved_after_every_spec_not_after_the_run():
+    import inspect
+    from spec_gen import gen_specs
+    src = inspect.getsource(gen_specs)
+    before_loop, _, after_loop = src.partition("for fut in as_completed(futures):")
+    assert "save_cache(cache_path, cache)" in after_loop.split("cache_path.write_text")[0]
+    assert "cache_path.write_text" not in src          # only the atomic helper writes it
+
+
+def test_save_cache_is_atomic(tmp_path):
+    from spec_gen import save_cache
+    p = tmp_path / ".cache.json"
+    p.write_text('{"old": "1"}')
+    save_cache(p, {"new": "2"})
+    assert json.loads(p.read_text()) == {"new": "2"}
+    assert not (tmp_path / ".cache.json.tmp").exists()   # the temp file is renamed, not left
+
+
+def test_a_damaged_cache_costs_money_never_correctness(tmp_path, capsys):
+    from spec_gen import load_cache
+    p = tmp_path / ".cache.json"
+    assert load_cache(p) == {}                            # absent
+    p.write_text('{"tc": "hash", ')                       # truncated by a kill
+    assert load_cache(p) == {}
+    assert "unreadable cache" in capsys.readouterr().err
+    p.write_text('["not", "a", "dict"]')
+    assert load_cache(p) == {}
+    p.write_text('{"tc": "hash"}')
+    assert load_cache(p) == {"tc": "hash"}
+
+
+# ---------------------------------------------------------------------------
+# The spec file name carries the TC's TITLE. Reword a title and spec-gen writes a
+# NEW file; nothing ever deleted the old one, and matrix went on running it.
+# ---------------------------------------------------------------------------
+
+def _scenario(tmp_path, stem, tc_id, title):
+    webqa = tmp_path / ".web-qa"
+    (webqa / "scenarios").mkdir(parents=True, exist_ok=True)
+    (webqa / "specs").mkdir(parents=True, exist_ok=True)
+    (webqa / "scenarios" / f"{stem}.md").write_text(
+        f"# s\n\n## {tc_id} — {title}\n**Type:** passive\n**Steps:**\n1. Open `/x`.\n"
+        f"**Expected:**\n- ok\n")
+    return webqa
+
+
+def test_expected_spec_names_matches_what_gen_specs_writes(tmp_path):
+    from spec_gen import expected_spec_names, spec_file_name
+    webqa = _scenario(tmp_path, "orders", "TC-ORD1", "Registry reflects the backend")
+    names = expected_spec_names(webqa)
+    assert names == {spec_file_name("orders", "TC-ORD1", "Registry reflects the backend"):
+                     "orders::TC-ORD1"}
+
+
+def test_a_reworded_title_leaves_an_orphan_and_we_name_it(tmp_path):
+    from spec_gen import orphan_specs, spec_file_name
+    webqa = _scenario(tmp_path, "orders", "TC-ORD1", "New title")
+    stale = webqa / "specs" / spec_file_name("orders", "TC-ORD1", "Old title")
+    stale.write_text("// stale")
+    (webqa / "specs" / spec_file_name("orders", "TC-ORD1", "New title")).write_text("// live")
+    assert orphan_specs(webqa) == [stale.name]          # same TC id, different file
+
+
+def test_orphan_detection_leaves_hand_written_and_adhoc_specs_alone(tmp_path):
+    from spec_gen import orphan_specs
+    webqa = _scenario(tmp_path, "orders", "TC-ORD1", "T")
+    (webqa / "specs" / "_debug-grid.spec.ts").write_text("// adhoc")
+    (webqa / "specs" / "smoke.spec.ts").write_text("// hand-written, no TC id")
+    assert orphan_specs(webqa) == []
+
+
+def test_prune_removes_the_orphan_and_its_trailing_markers(tmp_path):
+    from spec_gen import prune_orphan_specs
+    webqa = _scenario(tmp_path, "orders", "TC-ORD1", "T")
+    for suffix in ("", ".FAILED", ".bak", ".proposed"):
+        (webqa / "specs" / ("orders__tc-ord1-old.spec.ts" + suffix)).write_text("x")
+    removed = prune_orphan_specs(webqa, ["orders__tc-ord1-old.spec.ts"])
+    assert len(removed) == 4
+    assert not any((webqa / "specs").glob("orders__tc-ord1-old*"))
+
+
+def test_matrix_reports_an_orphan_and_refuses_to_run_it(tmp_path):
+    from matrix import collect_specs
+    webqa = tmp_path / ".web-qa"
+    (webqa / "specs").mkdir(parents=True)
+    (webqa / "specs" / "orders__tc-ord1-old.spec.ts").write_text("await api.post('/orders', {});")
+    (webqa / "specs" / "orders__tc-ord2-live.spec.ts").write_text("await api.get('/orders');")
+    rows, _ = collect_specs(webqa, False, [], {}, {"orders__tc-ord1-old.spec.ts"})
+    by = {r["file"]: r for r in rows}
+    orphan = by["orders__tc-ord1-old.spec.ts"]
+    assert orphan["kind"] == "orphan"
+    assert orphan["status"] == "manual"          # never runs, never blocks the gate
+    assert orphan["skipped_mutating"] is True    # and it CAN mutate — that is the point
+    assert by["orders__tc-ord2-live.spec.ts"]["kind"] == "spec"
+
+
+def test_gen_specs_reports_orphans_but_only_prunes_when_asked():
+    import inspect
+    from spec_gen import gen_specs
+    src = inspect.getsource(gen_specs)
+    assert "ORPHAN SPEC" in src
+    assert "if prune:" in src
+    assert src.index("orphan_specs(webqa)") < src.index("if prune:")
+
+
+# ---------------------------------------------------------------------------
+# A long run is a black box unless it says where it is, how long, and how much.
+# ---------------------------------------------------------------------------
+
+def test_fmt_elapsed_reads_like_a_clock():
+    from progress import fmt_elapsed
+    assert fmt_elapsed(9) == "9s"
+    assert fmt_elapsed(75) == "1m15s"
+    assert fmt_elapsed(3725) == "1h02m"
+
+
+def test_fmt_bytes():
+    from progress import fmt_bytes
+    assert fmt_bytes(512) == "512B"
+    assert fmt_bytes(14_000) == "13.7KB"
+    assert fmt_bytes(3_000_000) == "2.9MB"
+
+
+def test_progress_line_answers_where_how_long_how_much(capsys):
+    from progress import Progress
+    bar = Progress("gen", 3, lambda: (3.84, 25.0))
+    bar.step("admin::TC-ADM7")
+    line = capsys.readouterr().err.strip()
+    assert line.startswith("[gen] 1/3 · ")
+    assert "$3.84/$25.00" in line
+    assert line.endswith("OK   admin::TC-ADM7")
+
+
+def test_a_zero_token_runner_prints_no_misleading_dollar_sign(capsys):
+    from progress import Progress
+    Progress("explore", 10).step("/orders")
+    assert "$" not in capsys.readouterr().err
+
+
+def test_an_uncapped_budget_shows_spend_without_a_ceiling(capsys):
+    from progress import Progress
+    Progress("gen", 2, lambda: (1.5, 0.0)).step("x")
+    err = capsys.readouterr().err
+    assert "$1.50" in err and "/$" not in err
+
+
+def test_in_flight_never_exceeds_the_worker_count(capsys):
+    """A pool thread finishes one job and picks up the next before the main thread harvests
+    the future. Decrementing in step() made a 2-worker run report "3 in flight"."""
+    from progress import Progress
+    bar = Progress("gen", 4)
+    bar.begin("a")
+    bar.begin("b")            # 2 in flight
+    bar.leave()               # worker A done with its unit…
+    bar.begin("c")            # …and immediately took the next one
+    lines = capsys.readouterr().err.strip().splitlines()
+    assert "(2 in flight)" in lines[1]
+    assert "(2 in flight)" in lines[2]
+    assert "(3 in flight)" not in "\n".join(lines)
+
+
+def test_progress_never_writes_to_stdout(capsys):
+    """stdout is the summary JSON, and it is BLOCK-buffered once redirected to a file —
+    progress written there is invisible until the process exits."""
+    from progress import Progress, emit
+    bar = Progress("gen", 1)
+    bar.start("x")
+    bar.begin("y")
+    bar.step("y")
+    bar.note("z")
+    bar.finish("w")
+    emit("gen", "q")
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.count("[gen]") == 6
+
+
+def test_every_runner_reports_progress_through_the_shared_module():
+    import inspect
+
+    import explore
+    import gen_scenarios
+    import maintain
+    import matrix
+    import run_scenarios
+    import spec_gen
+    for mod in (explore, gen_scenarios, maintain, matrix, run_scenarios, spec_gen):
+        src = inspect.getsource(mod)
+        assert "from progress import" in src, mod.__name__
+        # no runner keeps its own ad-hoc `[tag] …` print
+        assert 'print(f"[' not in src, mod.__name__
+
+
+def test_bin_wrappers_run_python_unbuffered():
+    from pathlib import Path
+    for f in sorted((Path(__file__).resolve().parent.parent / "bin").glob("web-qa-*")):
+        text = f.read_text()
+        if "runners/" in text and "python" in text:
+            assert "python -u " in text, f.name
+
+
+def test_a_re_crawl_that_found_nothing_new_does_not_invalidate_every_spec(tmp_path):
+    """The map's header carries the crawl time. Hashing it meant `web-qa-explore` alone cost
+    N × the per-spec price on the next `spec-gen`, for no change at all."""
+    from spec_gen import app_map_fingerprint
+    webqa = tmp_path / ".web-qa"
+    webqa.mkdir()
+    ctx = webqa / "app.context.md"
+    body = "# app\n\n{stamp}\n\n## Routes\n| `/orders` |\n"
+    ctx.write_text(body.format(stamp="<i>Auto-generated by web-qa Exploration on 2026-07-09 13:27 UTC.</i>"))
+    first = app_map_fingerprint(tmp_path)
+    ctx.write_text(body.format(stamp="<i>Auto-generated by web-qa Exploration on 2026-07-10 09:01 UTC.</i>"))
+    assert app_map_fingerprint(tmp_path) == first          # only the clock moved
+
+    ctx.write_text(ctx.read_text().replace("/orders", "/invoices"))
+    assert app_map_fingerprint(tmp_path) != first          # real content still counts
+
+
+def test_a_retry_names_itself_because_it_is_a_second_full_call():
+    """A probe retry that then succeeded printed nothing: one `OK` line for two model calls.
+    The run's real per-spec price was a third above the one the log implied."""
+    import inspect
+    from spec_gen import gen_one
+    src = inspect.getsource(gen_one)
+    assert src.count("_note(f\"RETRY") + src.count("_note(f'RETRY") >= 2
+    assert "costs another full call" in src
+
+
+def test_summary_names_the_calls_that_were_retries():
+    import inspect
+    from spec_gen import gen_specs
+    src = inspect.getsource(gen_specs)
+    assert 'summary["llm"]["retries"] = extra' in src
+
+
+def test_the_passive_stage_streams_its_child_progress(capsys):
+    """matrix captured the child's stderr, so a multi-minute stage per role printed nothing
+    until it finished. stdout stays captured — its last line is the summary JSON."""
+    import inspect
+    from matrix import run_passive_stage
+    src = inspect.getsource(run_passive_stage)
+    assert "capture_output=True" not in src
+    assert "stdout=subprocess.PIPE" in src
+    assert "stderr" not in src.split("subprocess.run(")[1].split(")")[0]
+
+
+# ---------------------------------------------------------------------------
+# `✋ manual` for a mutating TC made a done job look undone: its spec ran.
+# ---------------------------------------------------------------------------
+
+def test_spec_for_tc_finds_both_naming_shapes(tmp_path):
+    from run_scenarios import spec_for_tc
+    specs = tmp_path / "specs"
+    specs.mkdir()
+    (specs / "admin__tc-adm2--scope-level.spec.ts").touch()
+    (specs / "coverage-gaps__tc-gap7.spec.ts").touch()      # title slugified to nothing
+    assert spec_for_tc(tmp_path, "TC-ADM2") == "admin__tc-adm2--scope-level.spec.ts"
+    assert spec_for_tc(tmp_path, "TC-GAP7") == "coverage-gaps__tc-gap7.spec.ts"
+    assert spec_for_tc(tmp_path, "TC-ADM20") is None        # no prefix collision
+    assert spec_for_tc(tmp_path, "TC-NOPE") is None
+
+
+
+
+def test_the_dead_include_mutating_flag_is_gone():
+    """Both of its branches produced `manual`. It promised what the engine cannot do."""
+    import inspect
+    import run_scenarios
+    assert "include-mutating" not in inspect.getsource(run_scenarios)
+
+
+def test_prompts_say_the_map_has_no_dialogs():
+    """The rule "an element with no accessible name cannot be found by getByLabel" never
+    fires for a modal: the crawler does not open dialogs, so nothing about them is in the
+    map at all, and the model defaults to getByLabel. Five specs hung on exactly that."""
+    from maintain import FIX_PROMPT
+    p = _prompt()
+    assert "dialog opened by «X»" in p               # the map may now carry the real modal DOM
+    assert "did not open its" in p                    # …and when it does not, say so
+    assert "--interactive" in FIX_PROMPT
+    assert "getByLabel` inside a dialog" in p
+
+
+def test_ansi_escapes_do_not_hide_playwrights_progress():
+    """The `line` reporter rewrites one terminal line, so each progress line arrives behind
+    ESC[1A ESC[2K. Anchoring at ^ matched nothing and the specs stage went silent."""
+    from matrix import RE_ANSI, RE_PW_FAIL, RE_PW_LINE
+    raw = "\x1b[1A\x1b[2K[7/72] [chromium] › specs/a__tc-adm7.spec.ts:19:5 › TC-ADM7: rows\n"
+    m = RE_PW_LINE.search(RE_ANSI.sub("", raw).rstrip())
+    assert m and m.groups() == ("7", "72", "specs/a__tc-adm7.spec.ts", "TC-ADM7: rows")
+    f = RE_PW_FAIL.match("  1) [chromium] › specs/b.spec.ts:19:5 › TC-X: t")
+    assert f and f.group(1) == "specs/b.spec.ts"
+
+
+def test_one_executed_test_one_row():
+    from matrix import fold_mutating_into_specs
+    scen = [
+        {"id": "TC-ADM2", "kind": "mutating", "status": "manual", "role": "admin"},
+        {"id": "TC-ADM2", "kind": "mutating", "status": "manual", "role": "editor"},
+        {"id": "TC-ADM9", "kind": "mutating", "status": "manual", "role": "admin"},
+        {"id": "TC-ADM9", "kind": "mutating", "status": "manual", "role": "viewer"},
+        {"id": "TC-ADM1", "kind": "passive", "status": "pass", "role": "admin"},
+    ]
+    specs = [{"id": "TC-ADM2", "file": "admin__tc-adm2.spec.ts"}]
+    kept, folded = fold_mutating_into_specs(scen, specs)
+    ids = [(r["id"], r["status"]) for r in kept]
+    assert ("TC-ADM2", "manual") not in ids           # its spec row carries the verdict
+    assert ids.count(("TC-ADM9", "manual")) == 1      # no spec: one honest row, not two
+    assert ("TC-ADM1", "pass") in ids                 # passive rows untouched
+    assert folded == 3
+
+
+def test_a_mutating_tc_with_no_spec_stays_honestly_manual():
+    from matrix import fold_mutating_into_specs
+    scen = [{"id": "TC-X", "kind": "mutating", "status": "manual", "role": "admin"}]
+    kept, folded = fold_mutating_into_specs(scen, [])
+    assert folded == 0
+    assert kept[0]["status"] == "manual"
+    assert "nothing executed it" in kept[0]["note"]
+    assert kept[0]["role"] == "-"          # the role dimension meant nothing here
+
+
+# ---------------------------------------------------------------------------
+# Four defects the first complete matrix run exposed, three of them mine.
+# ---------------------------------------------------------------------------
+
+def test_param_constraints_state_the_bounds_a_spec_would_otherwise_cross():
+    """`?size=500` against a declared `maximum: 200` returns 422, and a spec reads that as
+    the app being broken. The map printed `size:integer` and nothing else."""
+    from explore import param_constraints
+    assert param_constraints({"minimum": 1, "maximum": 200, "default": 50}) == "[1..200]=50"
+    assert param_constraints({"minimum": 1, "default": 1}) == "[1..]=1"
+    assert param_constraints({"enum": ["asc", "desc"], "default": "desc"}) == "(asc|desc)=desc"
+    assert param_constraints({"type": "string"}) == ""
+
+
+def test_op_params_carries_the_bounds():
+    from explore import op_params
+    op = {"parameters": [{"name": "size", "in": "query",
+                          "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}}]}
+    assert op_params({}, op) == "query: size:integer[1..200]=50"
+
+
+def _prompt(**over):
+    """Format PROMPT_TEMPLATE with every placeholder filled. One place to update when the
+    template grows a section — eight tests used to break on each new one."""
+    kw = dict(stack="next", frontend_url="http://f", backend_url="http://b", login_email="e@x",
+              login_password="pw", test_timeout_ms=60000, seed_section="", app_context="MAP",
+              dnd_section="", test_data_prefix="QA-", auth_login_hint="hint", tc_body="TC",
+              fixtures_section="", a11y_section="")
+    kw.update(over)
+    return PROMPT_TEMPLATE.format(**kw)
+
+
+def test_the_prompt_no_longer_recommends_a_playwright_api_that_does_not_exist():
+    """`locator('input').near(...)` — I put it in the prompt; two specs died on
+    `TypeError: page.locator(...).near is not a function`. `:near()` is a selector string."""
+    from maintain import FIX_PROMPT
+    p = _prompt()
+    # it may only appear as the thing being forbidden, never as a recipe
+    assert "`page.locator('input').near(...)` DOES NOT EXIST" in p
+    assert "There is NO `.near()` method on a Locator" in FIX_PROMPT
+    assert "input:near(:text(" in p and "input:near(:text(" in FIX_PROMPT
+
+
+def test_the_prompt_explains_the_snapshot_name_versus_value_syntax():
+    """`- combobox: Pick a customer` is a VALUE, not a name. The generator passed it to
+    `getByRole('combobox', {name: 'Выберите заказчика'})`, which matches nothing."""
+    p = _prompt()
+    assert 'accessible NAME' in p and 'VALUE' in p
+    assert "Passing a `: value` into" in p
+
+
+def test_the_prompt_forbids_hardcoded_entity_ids():
+    """Six specs asserted `heading /Order 48/`. 48 came from the map — one sample from one
+    crawl — and mutating specs had since rewritten the database."""
+    p = _prompt()
+    assert "NEVER hardcode an entity id" in p
+    assert "asserting the state of a" in p
+
+
+def test_both_prompts_survive_str_format():
+    """FIX_PROMPT goes through .format(); a literal `{ name }` in prose became a placeholder
+    and every heal died with `KeyError: ' name '` — caught only by an integration test."""
+    from maintain import FIX_PROMPT
+    FIX_PROMPT.format(app_context="M", seed_section="", spec_name="x.spec.ts",
+                      spec_code="c", errors="e", failure_context_section="")
+    _prompt()   # PROMPT_TEMPLATE, same hazard
+
+
+# ---------------------------------------------------------------------------
+# The passive runner: 71 × 401 and 15 × 404 across three roles, none of them the app.
+# ---------------------------------------------------------------------------
+
+def test_backend_probes_carry_the_bearer_token():
+    """api_login returns a token; the passive runner sent cookies only. Every backend GET a
+    test case documents answered 401, and that was reported as the test case failing."""
+    from run_scenarios import backend_client
+    with backend_client({"s": "1"}, "TOK") as c:
+        assert c.headers["authorization"] == "Bearer TOK"
+    with backend_client({"s": "1"}, None) as c:
+        assert "authorization" not in c.headers      # cookie-session apps unchanged
+
+
+def test_an_unresolved_path_template_is_not_probed():
+    """`GET /orders/{order_id}` with no `id_discovery` was requested literally; the 404 for a
+    URL that was never a URL counted as a failure."""
+    import inspect
+    from run_scenarios import run_passive_tc
+    src = inspect.getsource(run_passive_tc)
+    assert 'if "{" in materialized:' in src
+    assert "unresolved placeholder" in src
+    assert src.index("unresolved placeholder") < src.index("cli.request(method, full)")
+
+
+def test_a_spec_backed_tc_is_not_failed_by_the_keyword_heuristic():
+    """The check counts how many words of the Expected prose appear on the page. The better a
+    test case gets ("the row count equals GET /orders"), the fewer of its words a page shows."""
+    import inspect
+    from run_scenarios import run_passive_tc
+    src = inspect.getsource(run_passive_tc)
+    assert "asserted_by_spec" in src
+    assert "informational: asserted by" in src
+    # visual regressions and 4xx still fail, spec or no spec
+    assert src.count('overall = "fail"') >= 3
+
+
+# ---------------------------------------------------------------------------
+# `Buffer.from('%PDF-1.4 test content')` is not a PDF; an importer rejects it.
+# ---------------------------------------------------------------------------
+
+def test_fixtures_section_lists_what_a_spec_may_upload(tmp_path):
+    from spec_gen import fixtures_section
+    assert "none exist" in fixtures_section(tmp_path)
+    d = tmp_path / ".web-qa" / "fixtures"
+    d.mkdir(parents=True)
+    (d / "invoice.xlsx").write_bytes(b"x" * 1234)
+    (d / ".keep").write_text("")
+    out = fixtures_section(tmp_path)
+    assert "`fixtures/invoice.xlsx` (1234 bytes)" in out
+    assert ".keep" not in out
+
+
+def test_fixture_rule_separates_a_stored_file_from_a_parsed_one():
+    p = _prompt(fixtures_section="FIXTURE-LIST-HERE")
+    assert "STORES / ATTACHES" in p and "PARSES it" in p
+    assert "is not a PDF" in p
+    assert "test.skip(true, 'needs fixtures/" in p
+    assert "FIXTURE-LIST-HERE" in p
+
+
+# ---------------------------------------------------------------------------
+# axe already knew why getByLabel could never work; nobody told the generator.
+# ---------------------------------------------------------------------------
+
+def test_latest_a11y_reads_the_newest_report(tmp_path):
+    from spec_gen import latest_a11y
+    webqa = tmp_path / ".web-qa"
+    old = webqa / "reports" / "R1"
+    new = webqa / "reports" / "R2" / "admin"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    (old / "a11y.json").write_text(json.dumps([{"tc": "x", "violations": [
+        {"id": "label", "nodeCount": 99}]}]))
+    (new / "a11y.json").write_text(json.dumps([{"tc": "y", "violations": [
+        {"id": "button-name", "nodeCount": 46}, {"id": "label", "nodeCount": 18},
+        {"id": "color-contrast", "nodeCount": 211}]}]))
+    import os
+    import time
+    os.utime(new / "a11y.json", (time.time() + 10, time.time() + 10))
+    counts = latest_a11y(tmp_path / ".web-qa")
+    assert counts == {"button-name": 46, "label": 18}      # contrast is irrelevant to locators
+
+
+def test_a11y_section_is_empty_without_a_report(tmp_path):
+    from spec_gen import a11y_section
+    assert a11y_section(tmp_path / ".web-qa") == ""
+
+
+def test_a11y_section_names_the_locator_that_cannot_work(tmp_path):
+    from spec_gen import a11y_section
+    d = tmp_path / ".web-qa" / "reports" / "R1"
+    d.mkdir(parents=True)
+    (d / "a11y.json").write_text(json.dumps([{"violations": [{"id": "label", "nodeCount": 12}]}]))
+    out = a11y_section(tmp_path / ".web-qa")
+    assert "`getByLabel` cannot match them" in out
+    assert "measured, not hypothetical" in out
+
+
+def test_prompt_covers_the_redirect_race_and_the_untyped_response():
+    p = _prompt()
+    assert "A REDIRECT IS NOT INSTANT" in p
+    assert "waitForURL" in p
+    assert "bare `object` (no fields) is genuinely untyped" in p
+    assert "size:integer[1..200]=50` rejects `?size=500`" in p
+
+
+# ---------------------------------------------------------------------------
+# Dialogs are the one part of the UI the crawler never saw.
+# ---------------------------------------------------------------------------
+
+def test_a_dialog_is_rendered_inside_its_routes_block():
+    """spec_gen slices the ARIA section BY ROUTE. A dialog stored anywhere else would never
+    reach the prompt of the test case that opens it."""
+    from explore import render_context_md
+    pages = [{"path": "/items", "origin": "crawl", "aria": '- button "New item"',
+              "dialogs": [{"trigger": "New item",
+                           "aria": '- dialog "New item":\n  - text: Title\n  - textbox'}]}]
+    md = render_context_md({"alias": "t", "target_url": "http://x"}, pages, {}, {})
+    block = md[md.index("### `/items`"):md.index("## Backend endpoints")]
+    assert "dialog opened by «New item»" in block
+    assert "- textbox" in block                       # unlabeled: the generator can now see it
+
+
+def test_slice_aria_carries_the_dialog_with_its_route():
+    from spec_gen import slice_aria
+    md = ("# M\n\n## ARIA snapshots\n\n"
+          "### `/items`\n```yaml\n- button \"New\"\n\n# --- dialog opened by «New» ---\n- textbox\n```\n"
+          "### `/help`\n```yaml\nq\n```\n\n## Backend endpoints\n- x\n")
+    out = slice_aria(md, {"/items"})
+    assert "dialog opened by «New»" in out
+    assert "/help" not in out
+
+
+def test_a_plain_recrawl_does_not_erase_captured_dialogs():
+    from explore import merge_pages
+    prev = [{"path": "/items", "aria": "old", "dialogs": [{"trigger": "New", "aria": "- textbox"}]}]
+    fresh = [{"path": "/items", "aria": "new"}]                 # crawled without --interactive
+    merged, report = merge_pages(prev, fresh, "2026-07-09")
+    assert merged[0]["aria"] == "new"                           # the page snapshot IS refreshed
+    assert merged[0]["dialogs"] == [{"trigger": "New", "aria": "- textbox"}]
+    assert report["dialogs"] == 1
+
+
+def test_interactive_discover_returns_dialogs_and_snapshots_them():
+    import inspect
+    from explore import capture_modal, interactive_discover
+    src = inspect.getsource(interactive_discover)
+    assert "capture_modal(page)" in src
+    assert 'page.keyboard.press("Escape")' in src          # leave the page as we found it
+    assert "return discovered, dialogs" in src
+    assert "[role=dialog], dialog[open]" in inspect.getsource(capture_modal)
+
+
+def test_navigation_timeout_survives_a_dev_servers_cold_compile():
+    """Two of 72 specs died on `page.goto: Timeout 15000ms` navigating to ordinary routes —
+    a Next dev server compiling a page on first request under a serial run."""
+    from pathlib import Path
+    text = (Path(__file__).resolve().parent.parent / "playwright.config.template.ts").read_text()
+    assert "navigationTimeout: 30_000" in text
+    assert "actionTimeout: 10_000" in text        # a locator miss still fails in 10s, by name
+
+
+def test_a_snapshot_that_shrinks_is_reported_not_swallowed():
+    """`lost_aria` only catches a snapshot disappearing. A page captured before its table
+    rendered replaces 15 KB of DOM with 3 KB, and the map silently gets worse."""
+    from explore import merge_pages
+    prev = [{"path": "/items", "aria": "x" * 15000}, {"path": "/ok", "aria": "y" * 1000}]
+    fresh = [{"path": "/items", "aria": "x" * 3000}, {"path": "/ok", "aria": "y" * 900}]
+    _, report = merge_pages(prev, fresh, "2026-07-09")
+    assert report["shrunk_aria"] == ["/items"]      # 3000 < 15000 * 0.5
+    assert report["lost_aria"] == []                # nothing vanished
