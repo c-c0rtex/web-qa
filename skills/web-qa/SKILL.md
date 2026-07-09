@@ -165,7 +165,7 @@ Each of those calls is a **headless `claude -p` session, not a single API reques
 - Do not raise `--workers` or switch `WEBQA_CLAUDE_MODEL` to a frontier model without the user asking. If specs come out poor on `sonnet`, say so and propose the upgrade; don't do it silently. Note `WEBQA_CLAUDE_MODEL` is a **global** override — setting it also drags `generate` off `opus`.
 - Enabling `WEBQA_CLAUDE_TOOLS` re-arms the agentic loop. There is currently no task in this skill that needs it.
 
-**Long runs (matrix / spec-gen / playwright) — don't wait blindly**: agent harnesses may background the command and lose the notification. Everything is durable: `matrix.json` is rewritten after every stage (`stage` field), live spec progress goes to `reports/<run>-matrix/playwright.log`, generation failures leave `specs/*.FAILED` markers. Poll those, not stdout.
+**Long runs (matrix / spec-gen / playwright) — don't wait blindly**: agent harnesses may background the command and lose the notification. Everything is durable: `matrix.json` is rewritten after every stage (`stage` field), live spec progress goes to `reports/<run>/matrix/playwright.log`, generation failures leave `specs/*.FAILED` markers. Poll those, not stdout.
 
 ## Commands
 

@@ -22,8 +22,7 @@ from pathlib import Path
 
 from explore import load_project
 from matrix import routes_from_context
-from run_scenarios import (RE_BACKEND_OP, RE_PATH_BACKTICKED, classify, declared_type,
-                           split_tcs)
+from run_scenarios import classify, declared_type, split_tcs, tc_routes
 from spec_gen import call_claude, llm_spend, load_app_context, slugify
 
 # Deciding WHAT to test is judgment work, and it runs exactly once per invocation —
@@ -109,30 +108,6 @@ RULES:
 
 Write the scenario now:
 """
-
-
-RE_STEPS = re.compile(r"\*\*Steps?:\*\*(.*?)(?=\*\*Expected|\Z)", re.S | re.IGNORECASE)
-
-
-def _norm_route(path: str) -> str:
-    """Collapse a TC's concrete path onto the same template shape routes_from_context uses."""
-    r = re.sub(r"\{[^}]+\}", "{id}", path.split("?")[0]) or "/"
-    return re.sub(r"/\d+(?=/|$)", "/{id}", r)
-
-
-def tc_routes(body: str) -> set[str]:
-    """Routes a test case actually navigates to.
-
-    Steps only, and never the target of an HTTP verb. Both restrictions are load-bearing:
-    an Expected bullet reading "redirects to `/`" names a route the TC never exercises,
-    and a step that documents its own `GET /admin/users` call still visits that page.
-    Using the runner's frontend/backend split here got both cases backwards."""
-    m = RE_STEPS.search(body)
-    if not m:
-        return set()
-    steps = RE_BACKEND_OP.sub(" ", m.group(1))   # strip `GET /x` API references
-    return {_norm_route(hit.group(1).rstrip(".,;:"))
-            for hit in RE_PATH_BACKTICKED.finditer(steps)}
 
 
 def route_coverage(webqa: Path) -> tuple[list[str], list[str]]:

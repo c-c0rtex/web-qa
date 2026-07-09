@@ -1193,3 +1193,68 @@ def test_protect_manual_noop_when_within_budget():
     from spec_gen import _protect_manual
     md = "short map"
     assert _protect_manual(md, 1000) == md
+
+
+# --------------------------------------------- static assets are not routes; per-TC slicing
+
+def test_is_static_asset():
+    from explore import is_static_asset
+    for p in ["/help/ru/orders/list.png", "/a/b.svg", "/x.PDF", "/style.css", "/f.woff2"]:
+        assert is_static_asset(p), p
+    for p in ["/orders", "/orders/17", "/help/orders", "/", "/import"]:
+        assert not is_static_asset(p), p
+
+
+ARIA_MAP = """# map
+
+## Routes (frontend)
+| Path |
+| `/orders` |
+
+## ARIA snapshots (role/name)
+
+### `/orders`
+```yaml
+button "New item"
+```
+### `/orders/23`
+```yaml
+button "Save"
+```
+### `/help`
+```yaml
+link "Help"
+```
+
+## Backend API
+### `/orders`
+- GET
+"""
+
+
+def test_slice_aria_keeps_only_the_routes_the_tc_visits():
+    from spec_gen import slice_aria
+    out = slice_aria(ARIA_MAP, {"/orders", "/orders/{id}"})
+    assert 'New item' in out and 'Save' in out
+    assert 'link "Help"' not in out            # /help is another test case's problem
+    assert "showing 2 of 3 route snapshots" in out
+    assert "## Backend API" in out                # everything outside the block is untouched
+
+
+def test_slice_aria_parent_route_pulls_in_its_entity_cards():
+    from spec_gen import slice_aria
+    out = slice_aria(ARIA_MAP, {"/orders"})       # TC only names /orders
+    assert 'Save' in out                     # /orders/23 is a child, still relevant
+
+
+def test_slice_aria_noop_without_routes_or_matches():
+    from spec_gen import slice_aria
+    assert slice_aria(ARIA_MAP, set()) == ARIA_MAP
+    # a TC that touches nothing we mapped keeps the whole section rather than none of it
+    assert slice_aria(ARIA_MAP, {"/ghost"}) == ARIA_MAP
+
+
+def test_tc_routes_moved_to_run_scenarios_is_still_the_same_rule():
+    from run_scenarios import tc_routes
+    body = "**Steps:**\n1. Open `/admin/users` (GET `/admin/users`).\n**Expected:**\n- to `/`"
+    assert tc_routes(body) == {"/admin/users"}

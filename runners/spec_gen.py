@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, resolve_credentials
-from run_scenarios import declared_type, split_tcs, tc_roles
+from run_scenarios import declared_type, norm_route, split_tcs, tc_roles, tc_routes
 
 
 MAX_CONTEXT_CHARS = 24000
@@ -425,6 +425,47 @@ def validate_spec(webqa: Path, out_path: Path) -> str | None:
 
 
 MANUAL_MARKER = "<!-- manual -->"
+RE_ARIA_ENTRY = re.compile(r"### `([^`]+)`\n```yaml\n.*?\n```", re.S)
+
+
+def _route_match(page_path: str, routes: set[str]) -> bool:
+    """A snapshot is relevant if the TC visits that page, one of its children (a row click
+    lands on `/orders/{id}` even when Steps only name `/orders`), or its parent. `/` is
+    nobody's prefix — it would otherwise match the whole map."""
+    n = norm_route(page_path)
+    for r in routes:
+        if n == r:
+            return True
+        if r != "/" and n.startswith(r.rstrip("/") + "/"):
+            return True
+        if n != "/" and r.startswith(n.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def slice_aria(md: str, routes: set[str]) -> str:
+    """Keep only the ARIA snapshots for routes this TC visits.
+
+    The section is identical for every TC and dwarfs everything else, so a head-truncation
+    silently dropped whichever routes rendered last — `/orders` among them. A spec for
+    `/orders` never needed the DOM of `/help`. Slicing removes the truncation, raises
+    relevance, and cuts the prompt for all N spec-gen calls."""
+    if not routes:
+        return md
+    start = md.find("## ARIA snapshots")
+    if start < 0:
+        return md
+    end = md.find("\n## ", start + 1)
+    if end < 0:
+        end = len(md)
+    header, _, body = md[start:end].partition("\n")
+    entries = list(RE_ARIA_ENTRY.finditer(body))
+    kept = [m.group(0) for m in entries if _route_match(m.group(1), routes)]
+    if not kept:
+        return md            # TC touches nothing we mapped — better the whole section than none
+    note = (f"_(showing {len(kept)} of {len(entries)} route snapshots — "
+            f"the ones this test case visits)_")
+    return md[:start] + header + "\n\n" + note + "\n\n" + "\n".join(kept) + "\n" + md[end:]
 
 
 def _protect_manual(md: str, budget: int) -> str:
@@ -441,9 +482,13 @@ def _protect_manual(md: str, budget: int) -> str:
     return auto[:head] + "\n…(auto map truncated)\n\n" + manual
 
 
-def load_app_context(proj_dir: Path) -> str:
+def load_app_context(proj_dir: Path, routes: set[str] | None = None) -> str:
     """Main app map plus any viewport-specific maps (app.context.<name>.md from
-    `web-qa-explore --viewport <name>`) — mobile TCs need the mobile DOM, not guesses."""
+    `web-qa-explore --viewport <name>`) — mobile TCs need the mobile DOM, not guesses.
+
+    `routes` (the routes of the TC being generated) slices the ARIA section down to the
+    pages that TC visits. Without it the same 25 KB of snapshots rides along in every call
+    and the tail gets truncated away."""
     webqa = proj_dir / ".web-qa"
     parts: list[str] = []
     main = webqa / "app.context.md"
@@ -453,6 +498,8 @@ def load_app_context(proj_dir: Path) -> str:
         parts.append(extra.read_text(encoding="utf-8"))
     if not parts:
         return "(no app.context.md — run web-qa-explore first for grounded selectors)"
+    if routes:
+        parts = [slice_aria(p, routes) for p in parts]
     # The manual section is the ONLY hand-written part of the map ("business rules the
     # crawler can't see"). It lives at the tail, so a head-truncation dropped it entirely —
     # web-qa invited the user to write knowledge there and then never showed it to the model.
@@ -534,13 +581,16 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     test_data_prefix = proj.get("test_data_prefix") or "QA-"
     auth_login_hint = proj.get("auth_login_hint") or DEFAULT_AUTH_HINT
     login_email, login_password = resolve_credentials(proj, None, None)
-    app_context = load_app_context(proj_dir)
+    # Per-TC below (ARIA sliced to the routes that TC visits). The FULL map still keys the
+    # cache: a re-crawl that changes any route must invalidate every spec, not just the
+    # ones whose own slice moved.
+    app_map_digest = load_app_context(proj_dir)
     seed = load_seed(proj_dir)
     seed_section = seed_prompt_section(seed)
     frontend_dir = proj_dir / proj["frontend_dir"] if proj.get("frontend_dir") else proj_dir
     dnd_section = dnd_recipe_section(detect_dnd_library(frontend_dir))
     # Cache key covers everything that shapes the output: TC body + template + app map + seed + urls
-    env_hash = tc_hash(PROMPT_TEMPLATE + app_context + seed + frontend_url + backend_url + dnd_section)
+    env_hash = tc_hash(PROMPT_TEMPLATE + app_map_digest + seed + frontend_url + backend_url + dnd_section)
 
     md_files = sorted(scenarios_dir.glob("*.md"))
     if not md_files:
@@ -589,7 +639,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 test_data_prefix=test_data_prefix,
                 auth_login_hint=auth_login_hint,
                 seed_section=seed_section,
-                app_context=app_context,
+                app_context=load_app_context(proj_dir, tc_routes(tc.get("body", ""))),
                 dnd_section=dnd_section,
                 tc_body=f"## {tc_id} — {tc.get('name', '')}\n\n{tc.get('body', '')}",
             )

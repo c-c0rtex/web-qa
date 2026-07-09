@@ -78,6 +78,29 @@ def tc_roles(body: str) -> list[str]:
     return [r.strip().strip("`").lower() for r in m.group(1).split(",") if r.strip()]
 
 
+RE_STEPS = re.compile(r"\*\*Steps?:\*\*(.*?)(?=\*\*Expected|\Z)", re.S | re.IGNORECASE)
+
+
+def norm_route(path: str) -> str:
+    """Collapse a concrete path onto the template shape the app map uses."""
+    r = re.sub(r"\{[^}]+\}", "{id}", path.split("?")[0]) or "/"
+    return re.sub(r"/\d+(?=/|$)", "/{id}", r)
+
+
+def tc_routes(body: str) -> set[str]:
+    """Routes a test case actually navigates to.
+
+    Steps only, and never the target of an HTTP verb. Both restrictions are load-bearing:
+    an Expected bullet reading "redirects to `/`" names a route the TC never exercises,
+    and a step that documents its own `GET /admin/users` still visits that page."""
+    m = RE_STEPS.search(body)
+    if not m:
+        return set()
+    steps = RE_BACKEND_OP.sub(" ", m.group(1))   # strip `GET /x` API references
+    return {norm_route(hit.group(1).rstrip(".,;:"))
+            for hit in RE_PATH_BACKTICKED.finditer(steps)}
+
+
 def is_backend_path(path: str, backend_prefixes: tuple[str, ...]) -> bool:
     return any(path == p or path.startswith(p) for p in backend_prefixes)
 
@@ -482,6 +505,9 @@ def main() -> int:
     ap.add_argument("--alias", required=True)
     ap.add_argument("--email")
     ap.add_argument("--password")
+    ap.add_argument("--reports-dir", help="write the report into this directory instead of "
+                                          ".web-qa/reports/<run-id> (used by web-qa-matrix so "
+                                          "one run leaves one folder, not two siblings)")
     ap.add_argument("--role", help="named role from project config `roles` (RBAC runs)")
     ap.add_argument("--viewport", help="named viewport from config `viewports`; "
                                        "non-default gets its own baseline set (@name suffix)")
@@ -509,7 +535,7 @@ def main() -> int:
     visual_exclude = proj.get("visual_exclude") or []
     run_id = now_run_id() + (f"-{args.role}" if args.role else "") + (f"-{args.viewport}" if args.viewport else "")
     vp_suffix = viewport_suffix(proj, args.viewport)
-    reports = project_path / ".web-qa" / "reports" / run_id
+    reports = Path(args.reports_dir) if args.reports_dir else project_path / ".web-qa" / "reports" / run_id
     reports.mkdir(parents=True, exist_ok=True)
     baseline_dir = project_path / ".web-qa" / "baseline"
 

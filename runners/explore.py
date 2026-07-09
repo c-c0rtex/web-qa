@@ -25,7 +25,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 from playwright.sync_api import sync_playwright
@@ -304,7 +304,7 @@ def extract_page_summary(page) -> dict:
       return {
         title: text(document.title),
         url: location.href,
-        path: location.pathname + location.search,
+        path: location.pathname,   // the app may replaceState a ?loaded=N onto the URL
         headings, forms, buttons, tables, links,
       };
     }
@@ -392,6 +392,11 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
         t = urlparse(target)
         if f"{t.scheme}://{t.netloc}" != origin:
             return
+        if is_static_asset(t.path):
+            return
+        # dedup already collapses the query, so visiting `/orders?loaded=14` and `/orders`
+        # was always the same page — enqueue the canonical form and keep it out of the map
+        target = urlunparse(t._replace(query="", fragment=""))
         tkey = normalize_for_dedup(target)
         if "{id}" in tkey:
             if target.split("#")[0] in visited or template_counts.get(tkey, 0) >= per_template:
@@ -467,6 +472,18 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
     return pages
 
 
+STATIC_EXT = re.compile(
+    r"\.(?:png|jpe?g|gif|svg|webp|avif|ico|bmp|pdf|zip|css|js|mjs|map|woff2?|ttf|eot|"
+    r"mp4|webm|mp3|xlsx?|docx?|csv|txt)$", re.IGNORECASE)
+
+
+def is_static_asset(path: str) -> bool:
+    """A screenshot is not a route. The crawler followed every same-origin `<a href>`, so a
+    docs page linking to 40 PNGs added 40 rows to the Routes table — half the map — and took
+    40 of the 74 ARIA slots, halving the snapshot every real page got from the shared budget."""
+    return bool(STATIC_EXT.search(urlparse(path).path))
+
+
 def sidecar_path(out: Path) -> Path:
     """app.context.md → app.context.json — the machine-readable twin the next crawl
     merges against. Parsing the rendered markdown back would be fragile."""
@@ -484,7 +501,10 @@ def load_prev_pages(out: Path) -> list[dict]:
 
 
 def page_key(p: dict) -> str:
-    return p.get("path") or p.get("url") or ""
+    """Canonical route key. An SPA that replaceStates `?loaded=14` onto the URL must not
+    register a second route — dedup already treats both as the same page."""
+    k = p.get("path") or p.get("url") or ""
+    return k.split("#")[0].split("?")[0] or ("/" if k else "")
 
 
 def merge_pages(prev: list[dict], fresh: list[dict], today: str) -> tuple[list[dict], dict]:
@@ -501,6 +521,8 @@ def merge_pages(prev: list[dict], fresh: list[dict], today: str) -> tuple[list[d
         k = page_key(p)
         if not k or k in fresh_by or p.get("uncrawled"):
             continue
+        if is_static_asset(k):
+            continue      # an earlier crawl mistook assets for routes; don't resurrect them
         q = dict(p)
         q["stale_since"] = p.get("stale_since") or today
         carried.append(k)

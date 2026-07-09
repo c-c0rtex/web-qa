@@ -11,7 +11,8 @@ anything failed — usable as a deploy gate:
   web-qa-matrix --alias my-app && ./deploy.sh
 
 Output:
-  <project>/.web-qa/reports/<RUN-ID>-matrix/
+  <project>/.web-qa/reports/<RUN-ID>/          — passive runner report
+  <project>/.web-qa/reports/<RUN-ID>/matrix/   — matrix.md/.json + specs artifacts
     matrix.md      — human-readable matrix
     matrix.json    — machine-readable (rows + stats), for CI
     playwright-results.json — raw playwright json (if specs stage ran)
@@ -94,7 +95,7 @@ def rows_for_role(rows: list[dict], role: str | None) -> list[dict]:
 # ---------- stages ----------
 
 def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = None,
-                      viewport: str | None = None) -> str | None:
+                      viewport: str | None = None, run_dir: Path | None = None) -> str | None:
     """Run run_scenarios.py, fold statuses back into scenario_rows. Returns report path or None."""
     cmd = [str(SKILL / ".venv" / "bin" / "python"), str(SKILL / "runners" / "run_scenarios.py"),
            "--alias", alias, "--no-fixtures"]  # matrix seeds once for ALL combos
@@ -102,6 +103,10 @@ def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = 
         cmd += ["--role", role]
     if viewport:
         cmd += ["--viewport", viewport]
+    if run_dir is not None:
+        # the single default combo owns the run folder; role/viewport combos get a subfolder
+        combo = "-".join(filter(None, [role, viewport]))
+        cmd += ["--reports-dir", str(run_dir / combo if combo else run_dir)]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     try:
         data = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -459,9 +464,11 @@ def main() -> int:
         run_fixture_cmd(proj)
 
     run_id = now_run_id()
-    run_dir = webqa / "reports" / f"{run_id}-matrix"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    matrix_md = run_dir / "matrix.md"
+    # one run, one folder: matrix artifacts at the top, each passive combo nested below
+    run_dir = webqa / "reports" / run_id
+    matrix_dir = run_dir / "matrix"
+    matrix_dir.mkdir(parents=True, exist_ok=True)
+    matrix_md = matrix_dir / "matrix.md"
     passive_reports: list[str] = []
 
     def snapshot(stage: str, flaky_keys: set[str] = frozenset(),
@@ -476,7 +483,7 @@ def main() -> int:
                           for r in rows)
         matrix_md.write_text(render_matrix_md(proj["alias"], run_id, rows, stats, gate_ok,
                                               coverage, flaky_keys, role_coverage, quarantined))
-        (run_dir / "matrix.json").write_text(json.dumps({
+        (matrix_dir / "matrix.json").write_text(json.dumps({
             "run_id": run_id, "alias": proj["alias"], "stage": stage, "gate_ok": gate_ok,
             "stats": stats, "coverage": coverage, "role_coverage": role_coverage,
             "flaky": sorted(flaky_keys), "quarantined": sorted(quarantined),
@@ -492,7 +499,7 @@ def main() -> int:
         for role, vp, rws in combo_sets:
             label = "".join([f" (role {role})" if role else "", f" (viewport {vp})" if vp else ""])
             print(f"[matrix] passive stage{label}: {len(rws)} TC", file=sys.stderr)
-            rep = run_passive_stage(args.alias, rws, role, vp)
+            rep = run_passive_stage(args.alias, rws, role, vp, run_dir=run_dir)
             if rep:
                 passive_reports.append(rep)
             snapshot(f"passive{label}")
@@ -500,7 +507,7 @@ def main() -> int:
         print(f"[matrix] specs stage: {len(spec_rows)} spec files", file=sys.stderr)
         # CLI --workers > config `workers` (small dev stands want 1: parallel chromiums
         # against one dev server turn timing into noise) > template default
-        run_specs_stage(webqa, spec_rows, run_dir, args.workers or proj.get("workers"),
+        run_specs_stage(webqa, spec_rows, matrix_dir, args.workers or proj.get("workers"),
                         viewport_env(proj), mobile_device)
         snapshot("specs")
 
