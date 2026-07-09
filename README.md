@@ -54,7 +54,7 @@ Want to see the output before installing? **[web-qa-demo](https://codeberg.org/c
 As a Claude Code plugin (from inside Claude Code):
 
 ```
-/plugin marketplace add https://codeberg.org/c-c0rtex/web-qa
+/plugin marketplace add https://codeberg.org/c-c0rtex/web-qa.git
 /plugin install web-qa@c-c0rtex
 ```
 
