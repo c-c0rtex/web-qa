@@ -26,6 +26,17 @@ window in under seven minutes. The generator is now cheap and bounded by constru
 - **Usage-limit failures are legible** — the CLI reports exhaustion on stdout, which the
   error path discarded; `*.FAILED` markers said only `exit 1`
 
+Scenario generation also stopped being coverage-blind:
+
+- **Deterministic route coverage** — `generate` now computes which app-map routes no test
+  case's `**Steps:**` navigate to, feeds that to the prompt, returns `uncovered_routes` in
+  its summary and prints a loud `COVERAGE GAP` warning. A model answering one scoped task
+  ("orders regression") cannot know an untouched dashboard exists; nothing else would ever
+  say so. `--cover-gaps` generates test cases for exactly those routes
+- **Model tiers follow the job** — deciding *what* to test is judgment and runs once per
+  invocation, so `generate` uses `opus`/`high`; turning a decided test case into code is
+  translation fanned out over every TC, so `spec-gen` stays on `sonnet`/`medium`
+
 ## Shipped — v0.4.0 (signal quality & drag-and-drop)
 
 - **Flake quarantine** — `quarantine_after: N`: a spec that flips pass/fail across the

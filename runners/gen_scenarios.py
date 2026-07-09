@@ -21,8 +21,16 @@ import sys
 from pathlib import Path
 
 from explore import load_project
-from run_scenarios import classify, declared_type, split_tcs
+from matrix import routes_from_context
+from run_scenarios import (RE_BACKEND_OP, RE_PATH_BACKTICKED, classify, declared_type,
+                           split_tcs)
 from spec_gen import call_claude, llm_spend, load_app_context, slugify
+
+# Deciding WHAT to test is judgment work, and it runs exactly once per invocation —
+# unlike spec-gen, which fans a mechanical translation out over every test case. The
+# tier is worth the few cents here; WEBQA_CLAUDE_MODEL still overrides it.
+SCENARIO_MODEL = "opus"
+SCENARIO_EFFORT = "high"
 
 MAX_DIFF_CHARS = 9000
 
@@ -57,6 +65,7 @@ PROMPT = """You are a senior QA engineer writing test-case scenarios for a web a
 
 APP MAP (auto-crawled; REAL routes, forms, buttons, tables — target only what exists here):
 {app_context}
+{coverage_section}
 {roles_section}
 {source_section}
 
@@ -93,6 +102,61 @@ Write the scenario now:
 """
 
 
+RE_STEPS = re.compile(r"\*\*Steps?:\*\*(.*?)(?=\*\*Expected|\Z)", re.S | re.IGNORECASE)
+
+
+def _norm_route(path: str) -> str:
+    """Collapse a TC's concrete path onto the same template shape routes_from_context uses."""
+    r = re.sub(r"\{[^}]+\}", "{id}", path.split("?")[0]) or "/"
+    return re.sub(r"/\d+(?=/|$)", "/{id}", r)
+
+
+def tc_routes(body: str) -> set[str]:
+    """Routes a test case actually navigates to.
+
+    Steps only, and never the target of an HTTP verb. Both restrictions are load-bearing:
+    an Expected bullet reading "redirects to `/`" names a route the TC never exercises,
+    and a step that documents its own `GET /admin/users` call still visits that page.
+    Using the runner's frontend/backend split here got both cases backwards."""
+    m = RE_STEPS.search(body)
+    if not m:
+        return set()
+    steps = RE_BACKEND_OP.sub(" ", m.group(1))   # strip `GET /x` API references
+    return {_norm_route(hit.group(1).rstrip(".,;:"))
+            for hit in RE_PATH_BACKTICKED.finditer(steps)}
+
+
+def route_coverage(webqa: Path) -> tuple[list[str], list[str]]:
+    """(covered, uncovered) app-map routes, judged against the TCs already on disk.
+
+    Deterministic and zero-token. A model answering one scoped task cannot know what
+    earlier runs covered, so without this an entire route — a dashboard, an import page —
+    stays untested forever and nobody notices."""
+    routes = routes_from_context(webqa)
+    if not routes:
+        return [], []
+    touched: set[str] = set()
+    for md in sorted((webqa / "scenarios").glob("*.md")):
+        for tc in split_tcs(md.read_text(encoding="utf-8")):
+            touched |= tc_routes(tc["body"])
+    covered = [r for r in routes if r in touched]
+    return covered, [r for r in routes if r not in touched]
+
+
+def coverage_prompt_section(covered: list[str], uncovered: list[str]) -> str:
+    """Tell the model what already exists, so it neither duplicates nor re-misses."""
+    if not covered and not uncovered:
+        return ""
+    lines = ["\nEXISTING COVERAGE (deterministic, computed from scenarios already on disk):"]
+    if covered:
+        lines.append("- routes with test cases: " + ", ".join(f"`{r}`" for r in covered))
+    if uncovered:
+        lines.append("- routes with NO test case at all: " + ", ".join(f"`{r}`" for r in uncovered))
+        lines.append("If the task above touches any uncovered route, cover it — those are the "
+                     "real blind spots. Do not re-test the basics of an already-covered route.")
+    return "\n".join(lines)
+
+
 def git_diff_summary(project_path: Path, ref: str) -> str:
     def run(*args: str) -> str:
         proc = subprocess.run(["git", "-C", str(project_path), *args],
@@ -117,6 +181,8 @@ def main() -> int:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--diff", help="git ref to diff against (e.g. main, HEAD~3)")
     src.add_argument("--task", help="free-text feature/task description")
+    src.add_argument("--cover-gaps", action="store_true",
+                     help="target the app-map routes no existing test case touches")
     ap.add_argument("--out", help="output file name inside scenarios/ (default: derived)")
     ap.add_argument("--prefix", default="G", help="TC id prefix letter(s), default G")
     ap.add_argument("--force", action="store_true", help="overwrite existing scenario file")
@@ -124,15 +190,28 @@ def main() -> int:
 
     proj = load_project(args.alias)
     proj_dir = Path(proj["path"])
-    scenarios_dir = proj_dir / ".web-qa" / "scenarios"
+    webqa = proj_dir / ".web-qa"
+    scenarios_dir = webqa / "scenarios"
     scenarios_dir.mkdir(parents=True, exist_ok=True)
+
+    covered, uncovered = route_coverage(webqa)
+
+    if args.cover_gaps:
+        if not uncovered:
+            print(json.dumps({"error": "no uncovered routes — nothing to generate",
+                              "covered": covered}), file=sys.stderr)
+            return 1
+        args.task = ("Cover the application routes that currently have no test case at all: "
+                     + ", ".join(uncovered))
+        print(f"[generate] --cover-gaps targeting {len(uncovered)} route(s): "
+              f"{', '.join(uncovered)}", file=sys.stderr)
 
     if args.diff:
         source_section = git_diff_summary(proj_dir, args.diff)
         default_name = f"diff-{slugify(args.diff)}.md"
     else:
         source_section = f"CHANGE UNDER TEST — task description:\n\n{args.task}"
-        default_name = f"{slugify(args.task)}.md"
+        default_name = "coverage-gaps.md" if args.cover_gaps else f"{slugify(args.task)}.md"
 
     role_names = [r.get("name") for r in proj.get("roles") or [] if r.get("name")]
     roles_section = (f"\nPROJECT ROLES (accounts exist for each): {', '.join(role_names)}\n"
@@ -146,11 +225,12 @@ def main() -> int:
         return 2
 
     prompt = PROMPT.format(app_context=load_app_context(proj_dir),
+                           coverage_section=coverage_prompt_section(covered, uncovered),
                            roles_section=roles_section,
                            source_section=source_section, prefix=args.prefix,
                            language=proj.get("language") or "English")
     print(f"[generate] asking claude ({'diff ' + args.diff if args.diff else 'task'})…", file=sys.stderr)
-    md = call_claude(prompt, timeout=240)
+    md = call_claude(prompt, timeout=240, model=SCENARIO_MODEL, effort=SCENARIO_EFFORT)
     if not md.strip():
         print(json.dumps({"error": "empty output from claude"}), file=sys.stderr)
         return 1
@@ -176,6 +256,16 @@ def main() -> int:
     summary = {"out": str(out_path), "tc_count": len(tc_ids), "tc_ids": tc_ids}
     if conflicts:
         summary["type_conflicts"] = conflicts
+
+    # Recomputed AFTER the write: a scoped task legitimately leaves gaps, but they must be
+    # stated out loud. Silence here is how a whole route stays untested for months.
+    _, still_uncovered = route_coverage(webqa)
+    summary["uncovered_routes"] = still_uncovered
+    if still_uncovered:
+        print(f"[generate] COVERAGE GAP — no test case touches: {', '.join(still_uncovered)}"
+              f"\n[generate] run `web-qa-generate --alias {args.alias} --cover-gaps` to close them",
+              file=sys.stderr)
+
     summary["llm"] = llm_spend()
     print(json.dumps(summary, ensure_ascii=False))
     return 0

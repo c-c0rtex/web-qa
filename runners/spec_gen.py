@@ -295,17 +295,29 @@ def strip_fences(out: str) -> str:
     return re.sub(r"\n?```\s*$", "", out)
 
 
-def claude_cmd(prompt: str) -> list[str]:
+def _resolve(env_var: str, override: str | None, default: str) -> str:
+    """Precedence: env var (user's explicit escape hatch) > caller's tier > default."""
+    from_env = os.environ.get(env_var)
+    if from_env is not None:
+        return from_env
+    return override if override is not None else default
+
+
+def claude_cmd(prompt: str, *, model: str | None = None, effort: str | None = None,
+               tools: str | None = None) -> list[str]:
     """Argv for one metered, tool-less `claude -p` session. Separated from call_claude
-    so the cost controls are testable without spawning the CLI."""
+    so the cost controls are testable without spawning the CLI.
+
+    Callers name their own tier: deciding WHAT to test is judgment work worth a strong
+    model (once per run), turning a decided test case into code is translation."""
     cmd = ["claude", "-p", prompt, "--output-format", "json", "--strict-mcp-config"]
-    model = os.environ.get("WEBQA_CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
-    if model:
-        cmd += ["--model", model]
-    effort = os.environ.get("WEBQA_CLAUDE_EFFORT", DEFAULT_CLAUDE_EFFORT)
-    if effort:
-        cmd += ["--effort", effort]
-    cmd += ["--tools", os.environ.get("WEBQA_CLAUDE_TOOLS", DEFAULT_CLAUDE_TOOLS)]
+    m = _resolve("WEBQA_CLAUDE_MODEL", model, DEFAULT_CLAUDE_MODEL)
+    if m:
+        cmd += ["--model", m]
+    e = _resolve("WEBQA_CLAUDE_EFFORT", effort, DEFAULT_CLAUDE_EFFORT)
+    if e:
+        cmd += ["--effort", e]
+    cmd += ["--tools", _resolve("WEBQA_CLAUDE_TOOLS", tools, DEFAULT_CLAUDE_TOOLS)]
     return cmd
 
 
@@ -329,7 +341,8 @@ def parse_claude_json(stdout: str) -> str:
     return strip_fences(str(payload.get("result") or ""))
 
 
-def call_claude(prompt: str, timeout: int | None = None) -> str:
+def call_claude(prompt: str, timeout: int | None = None, *, model: str | None = None,
+                effort: str | None = None, tools: str | None = None) -> str:
     """Run one headless `claude -p` session and return its text result.
 
     This is the ONLY place web-qa spends tokens — spec_gen, gen_scenarios and maintain
@@ -339,16 +352,18 @@ def call_claude(prompt: str, timeout: int | None = None) -> str:
         agentic loop re-reading the repo buys nothing and costs a great deal;
       * the model defaults to `sonnet` rather than inheriting whatever the user's
         interactive CLI is pinned to (a frontier default is several times the price
-        for what is a mechanical translation);
+        for what is, at this call site, a mechanical translation). Callers that do
+        judgment work rather than translation pass a stronger `model=`;
       * spend is metered via `--output-format json` and capped by WEBQA_MAX_USD.
 
-    Env overrides: WEBQA_CLAUDE_MODEL, WEBQA_CLAUDE_EFFORT, WEBQA_CLAUDE_TOOLS,
-    WEBQA_MAX_USD, WEBQA_GEN_TIMEOUT (seconds, default 300 — complex multi-step TCs
-    did not fit the old 180s and died silently).
+    Env overrides (they beat the caller's tier): WEBQA_CLAUDE_MODEL, WEBQA_CLAUDE_EFFORT,
+    WEBQA_CLAUDE_TOOLS, WEBQA_MAX_USD, WEBQA_GEN_TIMEOUT (seconds, default 300 — complex
+    multi-step TCs did not fit the old 180s and died silently).
     """
     _check_budget()
     timeout = timeout or int(os.environ.get("WEBQA_GEN_TIMEOUT", "300"))
-    proc = subprocess.run(claude_cmd(prompt), capture_output=True, text=True, timeout=timeout)
+    cmd = claude_cmd(prompt, model=model, effort=effort, tools=tools)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         # The CLI reports usage-limit exhaustion on stdout, not stderr. Reading only
         # stderr turned "5-hour limit reached" into a blank, unactionable error.

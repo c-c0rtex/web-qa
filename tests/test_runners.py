@@ -990,3 +990,105 @@ def test_budget_falls_back_on_garbage_env(monkeypatch):
     import spec_gen
     monkeypatch.setenv("WEBQA_MAX_USD", "not-a-number")
     assert spec_gen.llm_budget_usd() == spec_gen.DEFAULT_MAX_USD
+
+
+# ---------------------------------------------------------- scenario coverage awareness
+
+def test_claude_cmd_caller_tier_and_env_precedence(monkeypatch):
+    monkeypatch.delenv("WEBQA_CLAUDE_MODEL", raising=False)
+    monkeypatch.delenv("WEBQA_CLAUDE_EFFORT", raising=False)
+    # caller's tier wins over the default
+    cmd = claude_cmd("x", model="opus", effort="high")
+    assert _flag(cmd, "--model") == "opus" and _flag(cmd, "--effort") == "high"
+    # the user's env beats the caller's tier
+    monkeypatch.setenv("WEBQA_CLAUDE_MODEL", "haiku")
+    assert _flag(claude_cmd("x", model="opus"), "--model") == "haiku"
+
+
+def _webqa_with(tmp_path, routes_table, scenarios):
+    webqa = tmp_path / ".web-qa"
+    (webqa / "scenarios").mkdir(parents=True)
+    (webqa / "app.context.md").write_text(routes_table, encoding="utf-8")
+    for name, body in scenarios.items():
+        (webqa / "scenarios" / name).write_text(body, encoding="utf-8")
+    return webqa
+
+
+ROUTES_MD = """## Routes
+| Route | Title |
+| `/` | Dashboard |
+| `/orders` | Orders |
+| `/orders/17` | Order card |
+| `/admin/users` | Users |
+| `/import` | Import |
+"""
+
+# Two real the project shapes that a naive extractor gets backwards:
+#  * TC-A1 documents its own `GET /admin/users` call — the page is still visited
+#  * TC-A2 mentions `/` only as a redirect target in Expected — it never tests the dashboard
+ADMIN_TC = """# Admin regression
+
+## TC-A1 — Users list
+**Type:** passive
+**Steps:**
+1. Open `/admin/users`, wait for the table (GET `/admin/users`).
+**Expected:**
+- roles column renders
+
+## TC-A2 — Viewer is bounced
+**Type:** passive
+**Steps:**
+1. Open `/orders/17` as viewer.
+**Expected:**
+- redirected to `/`
+"""
+
+
+def test_route_coverage_finds_the_untouched_dashboard(tmp_path):
+    from gen_scenarios import route_coverage
+    webqa = _webqa_with(tmp_path, ROUTES_MD, {"admin.md": ADMIN_TC})
+    covered, uncovered = route_coverage(webqa)
+    # the page it documents a GET for is covered; the redirect target in Expected is not
+    assert covered == ["/orders/{id}", "/admin/users"]
+    assert uncovered == ["/", "/orders", "/import"]   # app-map order; "/" is the the project blind spot
+
+
+def test_tc_routes_ignores_expected_only_mentions():
+    from gen_scenarios import tc_routes
+    body = ADMIN_TC.split("## TC-A2")[1]
+    assert tc_routes(body) == {"/orders/{id}"}          # NOT "/"
+
+
+def test_tc_routes_keeps_a_page_that_documents_its_api_call():
+    from gen_scenarios import tc_routes
+    body = ADMIN_TC.split("## TC-A1")[1].split("## TC-A2")[0]
+    assert tc_routes(body) == {"/admin/users"}
+
+
+def test_route_coverage_normalizes_concrete_ids(tmp_path):
+    from gen_scenarios import route_coverage
+    tc = ADMIN_TC.replace("`/orders/17`", "`/orders/999`")
+    webqa = _webqa_with(tmp_path, ROUTES_MD, {"admin.md": tc})
+    covered, _ = route_coverage(webqa)
+    assert "/orders/{id}" in covered
+
+
+def test_route_coverage_empty_without_app_map(tmp_path):
+    from gen_scenarios import route_coverage
+    webqa = _webqa_with(tmp_path, "no routes table here", {})
+    assert route_coverage(webqa) == ([], [])
+
+
+def test_coverage_prompt_section_names_the_blind_spots():
+    from gen_scenarios import coverage_prompt_section
+    s = coverage_prompt_section(["/orders"], ["/", "/import"])
+    assert "`/orders`" in s and "`/import`" in s
+    assert "NO test case at all" in s
+    assert coverage_prompt_section([], []) == ""
+
+
+def test_gen_scenarios_prompt_format_survives_new_placeholder():
+    from gen_scenarios import PROMPT
+    out = PROMPT.format(app_context="ctx", coverage_section="cov", roles_section="",
+                        source_section="src", prefix="G", language="English")
+    assert "cov" in out and "TC-G1" in out
