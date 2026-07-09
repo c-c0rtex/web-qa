@@ -111,8 +111,9 @@ fix when something is missing.
 
 Shared runners, project specifics in two places:
 
-- **`projects.json`** (machine-local, NOT in any repo). Resolution order: `WEBQA_REGISTRY` env → `<skill root>/projects.json` (git-clone install) → `~/.config/web-qa/projects.json` (plugin install — the plugin cache dir changes on every update, so the registry lives outside it; `register-project` picks the right location automatically). Fields: `alias`, `path`, `target_url`, `backend_url`, **`auth: {email, password}`** — credentials live only here. No hardcoded fallbacks: without auth (or `--email/--password`) runners exit with a clear error. Optional **`roles: [{name, email, password}]`** — named accounts for RBAC runs (`--role manager`, `web-qa-matrix --roles admin,manager`). TCs annotated `**Role:** <name>` in scenarios run ONLY under that role's combos (spec-gen also logs them in as that role); unannotated TCs are role-agnostic.
+- **`projects.json`** (machine-local, NEVER inside the skill or the project repo). Resolution: `WEBQA_REGISTRY` env → `~/.config/web-qa/projects.json`. Holds only what is secret or machine-specific: `alias`, `path`, **`auth: {email, password}`**, optional **`roles: [{name, email, password}]`** (named accounts for RBAC runs — `--role manager`, `web-qa-matrix --roles admin,manager`; TCs annotated `**Role:** <name>` run ONLY under that role's combos, unannotated TCs are role-agnostic). Everything else — including `target_url` and `backend_url` — lives in `<project>/.web-qa/config.json` and may be committed. No hardcoded fallbacks: without auth (or `--email/--password`) runners exit with a clear error.
 - **`<project>/.web-qa/config.json`** (in the project repo): merged over the registry entry (`null` values ignored). Keys:
+  - `target_url` / `backend_url` — frontend and API base URLs
   - `stack` — string for the spec-gen prompt (e.g. `"Next.js + FastAPI admin"`, default `"web"`)
   - `backend_prefixes` — paths treated as backend-only (never opened as frontend routes). Default: `/auth`, `/api`, `/health`
   - `route_hints` — `[{path, keywords}]` to infer the route from TC text when no explicit path. Default: empty

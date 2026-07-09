@@ -331,42 +331,27 @@ def test_build_storage_state_localstorage_token():
 # ---------- registry ----------
 
 
-def test_registry_resolution_order(tmp_path, monkeypatch):
+def test_registry_never_lives_inside_the_skill(tmp_path, monkeypatch):
+    """A registry in the skill root shadowed the user's real one — a repo checkout answered
+    "alias not in registry" — and a plugin's version-scoped cache dir vanishes on update.
+    Passwords belong in neither."""
     import registry
-    monkeypatch.setattr(registry, "SKILL_ROOT", tmp_path / "skill")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.delenv("WEBQA_REGISTRY", raising=False)
-    # nothing exists → default (skill root) for a clear error message
-    assert registry.registry_path() == tmp_path / "skill" / "projects.json"
-    # xdg exists → used
-    xdg_reg = tmp_path / "xdg" / "web-qa" / "projects.json"
-    xdg_reg.parent.mkdir(parents=True)
-    xdg_reg.write_text("[]")
-    assert registry.registry_path() == xdg_reg
-    # skill-root registry beats xdg (classic install keeps working untouched)
-    local = tmp_path / "skill" / "projects.json"
-    local.parent.mkdir(parents=True)
-    local.write_text("[]")
-    assert registry.registry_path() == local
+    xdg = tmp_path / "xdg" / "web-qa" / "projects.json"
+
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "projects.json").write_text("[]")          # a stray copy must be ignored
+    monkeypatch.setattr(registry, "SKILL_ROOT", skill)
+
+    assert registry.registry_path() == xdg
+    assert registry.registry_write_path() == xdg
+
     # env beats everything
     monkeypatch.setenv("WEBQA_REGISTRY", str(tmp_path / "custom.json"))
     assert registry.registry_path() == tmp_path / "custom.json"
-
-
-def test_registry_write_path_plugin_install_goes_to_xdg(tmp_path, monkeypatch):
-    from pathlib import Path
-
-    import registry
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    monkeypatch.delenv("WEBQA_REGISTRY", raising=False)
-    plugin_root = Path.home() / ".claude" / "plugins" / "cache" / "mp" / "web-qa" / "0.3.3"
-    monkeypatch.setattr(registry, "SKILL_ROOT", plugin_root)
-    # fresh plugin install: no registry anywhere → write to the stable XDG path,
-    # NOT into the version-scoped cache dir that vanishes on update
-    assert registry.registry_write_path() == tmp_path / "xdg" / "web-qa" / "projects.json"
-    # classic install keeps the skill root
-    monkeypatch.setattr(registry, "SKILL_ROOT", tmp_path / "skill")
-    assert registry.registry_write_path() == tmp_path / "skill" / "projects.json"
+    assert registry.registry_write_path() == tmp_path / "custom.json"
 
 
 # ---------- route_mine ----------
@@ -1258,3 +1243,72 @@ def test_tc_routes_moved_to_run_scenarios_is_still_the_same_rule():
     from run_scenarios import tc_routes
     body = "**Steps:**\n1. Open `/admin/users` (GET `/admin/users`).\n**Expected:**\n- to `/`"
     assert tc_routes(body) == {"/admin/users"}
+
+
+# ------------------------------------------ template collapsing + per-TC OpenAPI slicing
+
+def test_dedupe_by_template_collapses_entity_cards_and_names_the_sample():
+    from explore import dedupe_by_template
+    out = dedupe_by_template([
+        {"path": "/orders/23", "aria": "a"},
+        {"path": "/orders/24", "aria": "b"},      # same route, second sample
+        {"path": "/orders"},
+        {"url": "http://x/boom", "error": "nope"},
+    ])
+    paths = [p.get("template") or p.get("url") for p in out]
+    assert paths == ["/orders/{id}", "/orders", "http://x/boom"]
+    assert out[0]["sampled_from"] == "/orders/23"   # a snapshot must come from a real page
+    assert "sampled_from" not in out[1]
+
+
+def test_dedupe_by_template_keeps_author_declared_param_names():
+    from explore import dedupe_by_template
+    out = dedupe_by_template([{"path": "/help/{section}", "uncrawled": True}])
+    assert out[0]["template"] == "/help/{section}"   # `{section}` says more than `{id}`
+
+
+API_MAP = """# map
+
+## Backend endpoints (from OpenAPI)
+
+### `/orders`
+- /orders — GET
+
+### `/shipments`
+- /shipments — GET
+
+### `/auth`
+- /auth/login — POST
+
+## Auth Flow
+- login
+"""
+
+
+def test_api_group():
+    from spec_gen import api_group
+    assert api_group("/orders/{id}/items") == "/orders"
+    assert api_group("/") == "/"
+
+
+def test_tc_api_groups_includes_named_oracle_endpoints_and_auth():
+    from spec_gen import tc_api_groups
+    body = "**Steps:**\n1. Открыть `/`.\n2. Эталон: GET `/invoices`.\n"
+    groups = tc_api_groups(body, ())
+    assert "/invoices" in groups   # the independent-oracle collection survives
+    assert "/auth" in groups               # every spec logs in
+
+
+def test_slice_openapi_keeps_only_callable_groups():
+    from spec_gen import slice_openapi
+    out = slice_openapi(API_MAP, {"/orders", "/auth"})
+    assert "### `/orders`" in out and "### `/auth`" in out
+    assert "### `/shipments`" not in out
+    assert "showing 2 of 3 endpoint groups" in out
+    assert "## Auth Flow" in out            # the next section is untouched
+
+
+def test_slice_openapi_noop_when_nothing_matches():
+    from spec_gen import slice_openapi
+    assert slice_openapi(API_MAP, {"/ghost"}) == API_MAP
+    assert slice_openapi(API_MAP, set()) == API_MAP

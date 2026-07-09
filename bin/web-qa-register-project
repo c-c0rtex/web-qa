@@ -41,9 +41,11 @@ def save(entries: list[dict]) -> None:
 
 
 # Scaffolded config.json: PROJECT-level keys only (null = unset, ignored by the merge).
-# Registry-level fields (alias, path, urls, auth) stay in projects.json — committing a
-# config.json must never leak machine paths or credentials into the project repo.
+# Only `path` and `auth`/`roles` stay in the registry — a committed config.json must never
+# leak a machine path or a credential into the project repo. URLs are neither.
 CONFIG_SKELETON = {
+    "target_url": None,
+    "backend_url": None,
     "stack": None,
     "language": None,
     "frontend_dir": None,
@@ -71,14 +73,26 @@ CONFIG_SKELETON = {
 }
 
 
-def init_project_dir(project_path: Path, alias: str) -> None:
+def init_project_dir(project_path: Path, alias: str, *, target_url: str | None = None,
+                     backend_url: str | None = None) -> None:
     web_qa = project_path / ".web-qa"
     web_qa.mkdir(parents=True, exist_ok=True)
     for sub in ("scenarios", "baseline", "reports", "fixtures"):
         (web_qa / sub).mkdir(exist_ok=True)
     cfg_file = web_qa / "config.json"
     if not cfg_file.exists():
-        cfg_file.write_text(json.dumps(CONFIG_SKELETON, ensure_ascii=False, indent=2) + "\n")
+        cfg = dict(CONFIG_SKELETON, target_url=target_url, backend_url=backend_url)
+        cfg_file.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+    else:
+        # re-register: keep the file, only fill URLs the user has not set
+        cfg = json.loads(cfg_file.read_text())
+        changed = False
+        for k, v in (("target_url", target_url), ("backend_url", backend_url)):
+            if v and not cfg.get(k):
+                cfg[k] = v
+                changed = True
+        if changed:
+            cfg_file.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
     ctx_file = web_qa / "app.context.md"
     if not ctx_file.exists():
         ctx_file.write_text(
@@ -118,11 +132,11 @@ def main() -> int:
         return 64
 
     abs_path = os.path.abspath(args.path)
+    # Registry = machine path + secrets, nothing else. Everything a teammate could also
+    # use lives in the project's own .web-qa/config.json.
     record = {
         "alias": args.alias,
         "path": abs_path,
-        "target_url": args.target_url,
-        "backend_url": args.backend_url,
         "auth": {"cmd": args.auth_cmd} if args.auth_cmd else None,
     }
 
@@ -138,7 +152,8 @@ def main() -> int:
         out.append(record)
 
     save(out)
-    init_project_dir(Path(abs_path), args.alias)
+    init_project_dir(Path(abs_path), args.alias,
+                     target_url=args.target_url, backend_url=args.backend_url)
 
     print(json.dumps({
         "registered": args.alias,

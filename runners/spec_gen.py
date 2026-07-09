@@ -30,7 +30,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, resolve_credentials
-from run_scenarios import declared_type, norm_route, split_tcs, tc_roles, tc_routes
+from run_scenarios import (DEFAULT_BACKEND_PREFIXES, declared_type, extract_paths, norm_route,
+                           split_tcs, tc_roles, tc_routes)
 
 
 MAX_CONTEXT_CHARS = 24000
@@ -468,6 +469,48 @@ def slice_aria(md: str, routes: set[str]) -> str:
     return md[:start] + header + "\n\n" + note + "\n\n" + "\n".join(kept) + "\n" + md[end:]
 
 
+def _section_bounds(md: str, title: str) -> tuple[int, int] | None:
+    s = md.find(title)
+    if s < 0:
+        return None
+    e = md.find("\n## ", s + 1)
+    return s, (len(md) if e < 0 else e)
+
+
+def api_group(path: str) -> str:
+    """`/orders/{id}/items` → `/orders` — the heading the OpenAPI section groups under."""
+    head = path.strip("/").split("/")[0]
+    return f"/{head}" if head else "/"
+
+
+def tc_api_groups(body: str, backend_prefixes: tuple[str, ...]) -> set[str]:
+    """API groups a TC could legitimately need: the pages it visits, the endpoints it names
+    outright (the independent-oracle rule makes TCs name their primary collections), and
+    auth — every spec logs in."""
+    fronts, backs = extract_paths(body, backend_prefixes)
+    groups = {api_group(p) for p in fronts} | {api_group(p) for _, p in backs}
+    groups.add("/auth")
+    return groups
+
+
+def slice_openapi(md: str, groups: set[str]) -> str:
+    """Keep only the endpoint groups this TC can plausibly call. The section is 15 KB of the
+    map and identical for every TC; a spec for `/items` never needed the schemas of
+    `/shipments`, `/payments` and `/fx`."""
+    b = _section_bounds(md, "## Backend endpoints")
+    if not b or not groups:
+        return md
+    s, e = b
+    header, _, body = md[s:e].partition("\n")
+    blocks = [blk for blk in re.split(r"(?m)^(?=### `)", body) if blk.strip().startswith("### `")]
+    kept = [blk for blk in blocks
+            if (m := re.match(r"### `([^`]+)`", blk.strip())) and m.group(1) in groups]
+    if not kept:
+        return md
+    note = f"_(showing {len(kept)} of {len(blocks)} endpoint groups — the ones this test case can call)_"
+    return md[:s] + header + "\n\n" + note + "\n\n" + "".join(kept).rstrip() + "\n" + md[e:]
+
+
 def _protect_manual(md: str, budget: int) -> str:
     """Truncate the auto-generated head, never the hand-written tail below MANUAL_MARKER."""
     if len(md) <= budget:
@@ -482,7 +525,8 @@ def _protect_manual(md: str, budget: int) -> str:
     return auto[:head] + "\n…(auto map truncated)\n\n" + manual
 
 
-def load_app_context(proj_dir: Path, routes: set[str] | None = None) -> str:
+def load_app_context(proj_dir: Path, routes: set[str] | None = None,
+                     api_groups: set[str] | None = None) -> str:
     """Main app map plus any viewport-specific maps (app.context.<name>.md from
     `web-qa-explore --viewport <name>`) — mobile TCs need the mobile DOM, not guesses.
 
@@ -500,6 +544,8 @@ def load_app_context(proj_dir: Path, routes: set[str] | None = None) -> str:
         return "(no app.context.md — run web-qa-explore first for grounded selectors)"
     if routes:
         parts = [slice_aria(p, routes) for p in parts]
+    if api_groups:
+        parts = [slice_openapi(p, api_groups) for p in parts]
     # The manual section is the ONLY hand-written part of the map ("business rules the
     # crawler can't see"). It lives at the tail, so a head-truncation dropped it entirely —
     # web-qa invited the user to write knowledge there and then never showed it to the model.
@@ -581,6 +627,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     test_data_prefix = proj.get("test_data_prefix") or "QA-"
     auth_login_hint = proj.get("auth_login_hint") or DEFAULT_AUTH_HINT
     login_email, login_password = resolve_credentials(proj, None, None)
+    backend_prefixes = tuple(proj.get("backend_prefixes") or DEFAULT_BACKEND_PREFIXES)
     # Per-TC below (ARIA sliced to the routes that TC visits). The FULL map still keys the
     # cache: a re-crawl that changes any route must invalidate every spec, not just the
     # ones whose own slice moved.
@@ -639,7 +686,8 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 test_data_prefix=test_data_prefix,
                 auth_login_hint=auth_login_hint,
                 seed_section=seed_section,
-                app_context=load_app_context(proj_dir, tc_routes(tc.get("body", ""))),
+                app_context=load_app_context(proj_dir, tc_routes(tc.get("body", "")),
+                                             tc_api_groups(tc.get("body", ""), backend_prefixes)),
                 dnd_section=dnd_section,
                 tc_body=f"## {tc_id} — {tc.get('name', '')}\n\n{tc.get('body', '')}",
             )

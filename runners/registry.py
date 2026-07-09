@@ -2,10 +2,13 @@
 
 Resolution order:
   1. WEBQA_REGISTRY env var (tests, CI, power users)
-  2. <skill root>/projects.json — classic `git clone` install into ~/.claude/skills/web-qa
-  3. $XDG_CONFIG_HOME/web-qa/projects.json (~/.config by default) — stable home for
-     plugin installs: the plugin cache directory (~/.claude/plugins/cache/<id>/<version>/)
-     changes on every update, so a registry stored there would vanish with each release.
+  2. $XDG_CONFIG_HOME/web-qa/projects.json (~/.config by default)
+
+The registry holds `alias`, `path`, `auth` and `roles` — machine paths and credentials.
+It deliberately does NOT live inside the skill: a plugin's cache directory changes on
+every update, a git-clone copy shadows the user's real registry (a repo checkout would
+answer "alias not in registry"), and neither is a place for passwords. Everything about
+the project that is not a secret belongs in `<project>/.web-qa/config.json`.
 """
 
 from __future__ import annotations
@@ -22,33 +25,12 @@ def _xdg_registry() -> Path:
 
 
 def registry_path() -> Path:
-    """Registry to READ. Falls back to the skill-root path when nothing exists yet,
-    so error messages point at the default location."""
+    """Registry to READ."""
     env = os.environ.get("WEBQA_REGISTRY")
-    if env:
-        return Path(env)
-    local = SKILL_ROOT / "projects.json"
-    if local.is_file():
-        return local
-    xdg = _xdg_registry()
-    if xdg.is_file():
-        return xdg
-    return local
+    return Path(env) if env else _xdg_registry()
 
 
 def registry_write_path() -> Path:
-    """Registry to WRITE (register-project). An existing registry always wins; when
-    creating fresh, a plugin install (version-scoped cache dir) gets the XDG path,
-    a classic install keeps the skill root."""
+    """Registry to WRITE (register-project). Same location — there is only one."""
     env = os.environ.get("WEBQA_REGISTRY")
-    if env:
-        return Path(env)
-    local = SKILL_ROOT / "projects.json"
-    if local.is_file():
-        return local
-    xdg = _xdg_registry()
-    if xdg.is_file():
-        return xdg
-    if Path.home() / ".claude" / "plugins" in SKILL_ROOT.parents:
-        return xdg
-    return local
+    return Path(env) if env else _xdg_registry()

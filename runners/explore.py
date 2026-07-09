@@ -515,6 +515,7 @@ def merge_pages(prev: list[dict], fresh: list[dict], today: str) -> tuple[list[d
     worse one. Every spec generated afterwards then guessed its selectors. Carrying the
     previous entry over (marked stale) keeps ground truth that specs already depend on."""
     fresh_by = {page_key(p): p for p in fresh if page_key(p)}
+    fresh_templates = {as_template(k) for k in fresh_by}
     merged = list(fresh)
     carried: list[str] = []
     for p in prev:
@@ -523,6 +524,8 @@ def merge_pages(prev: list[dict], fresh: list[dict], today: str) -> tuple[list[d
             continue
         if is_static_asset(k):
             continue      # an earlier crawl mistook assets for routes; don't resurrect them
+        if as_template(k) in fresh_templates:
+            continue      # `/orders/23` from last week adds nothing once `/orders/25` is mapped
         q = dict(p)
         q["stale_since"] = p.get("stale_since") or today
         carried.append(k)
@@ -561,7 +564,37 @@ def annotate_origins(pages: list[dict], mined: list[dict]) -> list[dict]:
     return pages + sorted(extra, key=lambda e: e["path"])
 
 
+def dedupe_by_template(pages: list[dict]) -> list[dict]:
+    """One entry per route template for RENDERING (the sidecar keeps every concrete page).
+
+    `/orders/23` and `/orders/24` are the same route, and the coverage denominator already
+    collapses them — so the map should speak the same language. A map that advertises
+    `/orders/23` also invites the spec to hardcode it, two lines after the prompt forbade it.
+    An ARIA snapshot still has to come from a real page, so we name the one it was sampled
+    from."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for p in pages:
+        path = p.get("path")
+        if not path:
+            out.append(p)          # error rows carry only `url`
+            continue
+        key = as_template(path)          # dedup key: /orders/23 and /orders/{orderId} are one route
+        if key in seen:
+            continue
+        seen.add(key)
+        q = dict(p)
+        # display: keep an author-declared param name (`/help/{section}` says more than
+        # `/help/{id}`); collapse only the concrete ids a crawl happened to land on
+        q["template"] = path if "{" in path else re.sub(r"/\d+(?=/|$)", "/{id}", path)
+        if q["template"] != path:
+            q["sampled_from"] = path
+        out.append(q)
+    return out
+
+
 def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: dict) -> str:
+    pages = dedupe_by_template(pages)
     lines: list[str] = []
     alias = project.get("alias", "project")
     lines.append(f"# {alias} — App Context\n")
@@ -581,14 +614,14 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
             lines.append(f"| {urlparse(p['url']).path} | _error_ | {p['error'][:60]} | — | — | — | crawl |")
             continue
         if p.get("redirected_to"):
-            lines.append(f"| `{p['path']}` | — | _redirects to `{p['redirected_to']}`_ "
+            lines.append(f"| `{p.get('template') or p['path']}` | — | _redirects to `{p['redirected_to']}`_ "
                          f"| — | — | — | {p.get('origin', 'crawl')} |")
             continue
         if p.get("uncrawled"):
-            lines.append(f"| `{p['path']}` | — | _declared in code, not reached by crawl_ "
+            lines.append(f"| `{p.get('template') or p['path']}` | — | _declared in code, not reached by crawl_ "
                          f"| — | — | — | {p['origin']} |")
             continue
-        path = p.get("path", "")
+        path = p.get("template") or p.get("path", "")
         title = (p.get("title") or "").replace("|", "\\|")[:60]
         head = " / ".join(h["text"] for h in p.get("headings", [])[:3]).replace("|", "\\|")[:80]
         forms_count = len(p.get("forms", []))
@@ -640,7 +673,9 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
             a = p["aria"]
             clipped = a[:per_page]
             note = "\n# …(snapshot clipped)" if len(a) > per_page else ""
-            lines.append(f"### `{p.get('path', '')}`\n```yaml\n{clipped}{note}\n```")
+            route = p.get("template") or p.get("path", "")
+            sampled = f"\n_(sampled from `{p['sampled_from']}`)_" if p.get("sampled_from") else ""
+            lines.append(f"### `{route}`{sampled}\n```yaml\n{clipped}{note}\n```")
     lines.append("")
 
     # ===== Backend endpoints =====
