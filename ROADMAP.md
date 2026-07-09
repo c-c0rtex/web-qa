@@ -6,6 +6,39 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.4.3 (the app map stops lying, and says so when it fails)
+
+Fifteen mutating specs hung for 30 seconds each and reported only `Test timeout of 30000ms
+exceeded.` — no locator, no step. The chain, verified end to end on a real project: the ARIA
+budget was spent in crawl order, so `/items` got no snapshot; the prompt demands
+map-grounded selectors and the map had none, so the model guessed
+`getByRole('button', {name: /Добавить|Создать|New item/})`; the real button reads
+«New item»; and with no `actionTimeout` the miss hung until the test timeout, silently.
+Thirteen of the fifteen timeouts were on routes with no snapshot.
+
+- **`actionTimeout` in the config template** — the same failure now names the locator.
+  `doctor` warns when a project's config lacks it, since the template does not back-propagate
+- **The ARIA budget is shared evenly**, not first-come. Ten routes had a full snapshot and
+  the rest — `/orders`, `/shipments`, `/items`, the most-tested sections — had none
+- **The crawler stopped following screenshots.** A docs page linking to 40 PNGs added 40
+  "routes", half the Routes table, and took 40 of the 74 snapshot slots. Paths are canonical
+  too: an SPA replaceStating `?loaded=14` onto `/orders` no longer registers a second route
+- **`explore` merges instead of overwriting.** A lower `--max-pages`, an expired session or
+  one slow page silently replaced a good map with a worse one. Routes now merge against an
+  `app.context.json` sidecar; unreached ones are carried over and marked stale, a vanished
+  snapshot is reported as a REGRESSION, `--fresh` restores the old behaviour, and a
+  `--max-pages` below the mined route count is a warning, not a surprise
+- **The map speaks in templates** — one row per route, naming the page each snapshot was
+  sampled from. It no longer advertises `/orders/23` two lines after the prompt forbade
+  hardcoding ids
+- **The prompt carries only what the TC can use.** ARIA and OpenAPI are sliced to the routes
+  a test case visits and the endpoints it names; the hand-written manual section is protected
+  from truncation instead of being the first thing dropped. A `/items` spec sees 9 KB
+  where it used to see a 24 KB truncation
+- One matrix run leaves one folder: `reports/<id>/` with `matrix/` nested inside it
+- The registry left the skill root, which shadowed the user's real one, and now holds only
+  `path`/`auth`/`roles`; URLs moved to the project's committable `.web-qa/config.json`
+
 ## Shipped — v0.4.2 (specs that test data, not decoration)
 
 A generated spec asserted that the dashboard's KPI tiles *rendered*. They rendered wrong
@@ -22,8 +55,11 @@ numbers, and the test was green — on a bug already written down in the project
   model correctly concluded it must not check the numbers at all
 - **Presence assertions no longer count** — `toBeVisible` does not cover an Expected bullet
   that names a value; the spec must assert the value
-- Validated end to end: the old dashboard spec passed on the broken dashboard; the
-  regenerated one fails with `tile shows 10, reference count is 14`
+- Known limit, found while validating this: an oracle that *re-implements* the metric is a
+  second, unverified implementation. On a real dashboard the regenerated spec failed with
+  `tile shows 10, reference count is 14` — and the application was right. The spec counted
+  invoices where the KPI counts orders, and compared an API enum (`paid`) against a Russian
+  display label. A failing data assertion is a question, not a verdict; see v0.4.3
 
 Reporting stopped lying about what happened:
 
