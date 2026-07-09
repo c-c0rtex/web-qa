@@ -10,7 +10,7 @@
       "name": "web-qa",
       "source": "./",
       "description": "Autonomous web-app QA: Playwright E2E, visual regression, axe-core accessibility — scenarios generated from a git diff or a task, specs grounded in a crawled app map, zero-token test runs, self-healing failures.",
-      "version": "0.4.5"
+      "version": "0.4.6"
     },
     {
       "name": "tg-qa",

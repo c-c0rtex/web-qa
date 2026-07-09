@@ -217,7 +217,10 @@ def main() -> int:
         print(json.dumps({"error": f"{out_path} exists; use --force or --out"}), file=sys.stderr)
         return 2
 
-    prompt = PROMPT.format(app_context=load_app_context(proj_dir),
+    # No ARIA: this prompt writes prose test cases, not locators. Whole-page snapshots would
+    # eat the budget and head-truncate `Backend endpoints` and `Enum values` — the very
+    # sections the CORRECTNESS rule tells it to cite.
+    prompt = PROMPT.format(app_context=load_app_context(proj_dir, include_aria=False),
                            coverage_section=coverage_prompt_section(covered, uncovered),
                            roles_section=roles_section,
                            source_section=source_section, prefix=args.prefix,

@@ -28,8 +28,27 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, viewport_env
+from run_scenarios import norm_route
 from spec_gen import (DEFAULT_MAX_USD, call_claude, llm_spend, load_app_context, load_seed,
                       postprocess_spec, seed_prompt_section, validate_spec)
+
+# `await page.goto(`${APP}/orders/${id}`)` → /orders/${id}; also plain '/orders'
+RE_SPEC_GOTO = re.compile(r"""goto\(\s*[`'"]([^`'"]*)""")
+
+
+def spec_routes(text: str) -> set[str]:
+    """Frontend routes a spec navigates to, so its ARIA slice is the pages it touches.
+
+    Snapshots are whole pages now (10–15 KB each). Handing the healer the map's first 48 000
+    characters means handing it whichever routes happen to sort first."""
+    out: set[str] = set()
+    for hit in RE_SPEC_GOTO.finditer(text):
+        raw = hit.group(1)
+        path = re.sub(r"^\$\{[^}]*\}|^https?://[^/]+", "", raw).split("?")[0]
+        path = re.sub(r"\$\{[^}]*\}", "1", path)          # `${orderId}` → a concrete-looking id
+        if path.startswith("/"):
+            out.add(norm_route(path))
+    return out
 
 FIX_PROMPT = """You are fixing a FAILING Playwright TypeScript spec for an existing web app.
 The app itself is considered correct — the spec has wrong selectors, timing or assertions.
@@ -313,11 +332,15 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
     """Returns (spec_name, out_file_or_None, error_or_None, kind, detail, probe_warning).
     kind: 'fix' | 'transient' | 'app-bug'."""
     artifacts = failure_artifacts(webqa, spec_path.name, artifacts_dir)
+    spec_code = spec_path.read_text(encoding="utf-8")
+    routes = spec_routes(spec_code)
+    if routes:
+        app_context = load_app_context(webqa.parent, routes)
     prompt = FIX_PROMPT.format(
         app_context=app_context,
         seed_section=seed_section,
         spec_name=spec_path.name,
-        spec_code=spec_path.read_text(encoding="utf-8")[:12000],
+        spec_code=spec_code[:12000],
         errors="\n\n---\n\n".join(errors[:4]),
         failure_context_section=failure_context_section(artifacts["error_context"]),
     )
@@ -418,7 +441,8 @@ def main() -> int:
     else:
         print("[maintain] no failure artifacts found — healing from error text alone",
               file=sys.stderr)
-    app_context = load_app_context(proj_dir)
+    # Fallback for a spec whose routes we cannot read; heal_one re-slices per spec when it can.
+    app_context = load_app_context(proj_dir, include_aria=False)
     seed_section = seed_prompt_section(load_seed(proj_dir))
     summary = {"healed": [], "transient": [], "app_bugs": [], "errors": [], "probe_warnings": [],
                "mode": "apply" if args.apply else "propose"}

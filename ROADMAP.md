@@ -6,6 +6,36 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.4.6 (the map was truncated before anyone could see it)
+
+v0.4.5 removed the cap that rationed ARIA snapshots across routes, and the map got no
+better. The cap that mattered sat one layer upstream, in the crawler:
+
+```python
+summary["aria"] = page.locator("body").aria_snapshot()[:800]
+```
+
+Eight hundred characters, applied at capture. On any app with a sidebar, that is the sidebar.
+No table, no heading, not one action button ever reached the map — not in any version of this
+tool. Raising the render cap could not help, because nothing longer than 800 characters had
+ever survived to be rendered. Verified on a real app: every snapshot in the file was exactly
+800 characters; after the fix the median is 6 859 and the page whose button the generator had
+been guessing with a regex alternation now states its caption outright.
+
+- **One `ARIA_PAGE_MAX`, used where the snapshot is taken and where it is written.** A test
+  fails if the two ever drift again. Truncation is recorded at capture, so the renderer can
+  report it instead of silently emitting a full-looking snapshot capped to exactly the limit
+- **`slice_openapi` dropped the enum block from every prompt.** `### Enum values` is a `###`
+  sibling of the endpoint groups and belongs to none of them, so group-filtering removed it —
+  while the prompt instructed the model to take allowed values from it. It always rides along now
+- **The scenario generator was losing the sections its own rule cites.** It loads the whole map
+  and the truncation eats the tail: `Backend endpoints`, `Enum values`, `Auth Flow`. It writes
+  prose test cases, not locators, so it now gets the map with the snapshot section dropped
+- **The spec cache was keyed on a truncated map**, so a re-crawl that changed anything past
+  the cut left every cached spec looking current. The fingerprint is taken from the files on disk
+- **`maintain` slices the map by the routes its spec navigates to.** With whole-page snapshots,
+  handing it the first 48 000 characters means handing it whichever routes sort first
+
 ## Shipped — v0.4.5 (the runners stop guessing what they were never told)
 
 A full run over a real app produced 52 failing specs. Four were candidate product bugs. The

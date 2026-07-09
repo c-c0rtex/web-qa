@@ -480,7 +480,21 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
             try:
                 # role/name ground truth for getByRole — far better selector grounding
                 # than our element tables alone (idea borrowed from Playwright's agents)
-                summary["aria"] = page.locator("body").aria_snapshot()[:800]
+                #
+                # The cap used to be 800 characters, applied HERE, at capture. On any app
+                # with a sidebar those 800 characters are the sidebar: no table, no headings,
+                # not one action button ever reached the map. Raising the RENDER cap
+                # accomplished nothing, because nothing longer than 800 had survived to be
+                # rendered. A real page snapshot is 10–15 KB. Slicing to the routes of one
+                # test case is spec_gen's job, and it cannot slice what was never captured.
+                snap = page.locator("body").aria_snapshot()
+                # Truncating to exactly ARIA_PAGE_MAX makes the loss invisible downstream:
+                # the renderer's `len(a) > ARIA_PAGE_MAX` can never be true. Record the fact
+                # here, where it is still known.
+                if len(snap) > ARIA_PAGE_MAX:
+                    summary["aria_truncated"] = True
+                    snap = snap[:ARIA_PAGE_MAX]
+                summary["aria"] = snap
             except Exception:
                 pass
             pages.append(summary)
@@ -622,6 +636,12 @@ def dedupe_by_template(pages: list[dict]) -> list[dict]:
 
 
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
+
+# One number, used where the snapshot is TAKEN and where it is written out. Two different
+# caps is how an 800-character capture limit hid behind a 20 000-character render limit.
+# A real page's aria snapshot is 10–15 KB; this only stops a pathological page from becoming
+# the whole file. The prompt budget is enforced later, by spec_gen.slice_aria.
+ARIA_PAGE_MAX = 20000
 
 
 def deref(openapi: dict, schema: dict) -> dict:
@@ -774,8 +794,7 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
     # keeps only the routes of the test case being generated, so the prompt budget belongs
     # THERE, not here. Sharing 16 KB across 47 routes left each one 400 characters — a page
     # title and two nodes — and the generator went right on guessing button captions.
-    # The map is a file on disk; let it hold what was actually captured.
-    ARIA_PAGE_MAX = 20000     # one pathological page must not become the whole file
+    # The map is a file on disk; let it hold what was actually captured (ARIA_PAGE_MAX).
     with_aria = [p for p in pages if p.get("aria")]
     if not with_aria:
         lines.append("_(no aria snapshots captured)_")
@@ -783,7 +802,8 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
         for p in with_aria:
             a = p["aria"]
             clipped = a[:ARIA_PAGE_MAX]
-            note = "\n# …(snapshot clipped)" if len(a) > ARIA_PAGE_MAX else ""
+            note = ("\n# …(snapshot clipped)"
+                    if p.get("aria_truncated") or len(a) > ARIA_PAGE_MAX else "")
             route = p.get("template") or p.get("path", "")
             sampled = f"\n_(sampled from `{p['sampled_from']}`)_" if p.get("sampled_from") else ""
             lines.append(f"### `{route}`{sampled}\n```yaml\n{clipped}{note}\n```")

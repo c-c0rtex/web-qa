@@ -1725,3 +1725,108 @@ def test_reruns_do_not_delete_the_artifacts_the_healer_is_about_to_read():
     src = inspect.getsource(rerun_is_flaky)
     assert "WEBQA_OUTPUT_DIR" in src
     assert "rerun-test-results" in src
+
+
+# ---------------------------------------------------------------------------
+# The 800-char cap that hid behind the 20 000-char one.
+# ---------------------------------------------------------------------------
+
+def test_capture_and_render_share_one_aria_cap():
+    """explore truncated the snapshot to 800 chars AT CAPTURE, so raising the render cap
+    changed nothing: on any app with a sidebar, 800 chars is the sidebar. No table, no
+    heading, not one action button ever reached the map. Two caps must never drift again."""
+    import inspect
+    import explore
+    src = inspect.getsource(explore)
+    assert "snap[:ARIA_PAGE_MAX]" in src         # the cap is applied at capture…
+    assert "\nARIA_PAGE_MAX = " in src           # …from the one module-level constant
+    assert "[:800]" not in src
+    assert explore.ARIA_PAGE_MAX >= 10_000       # a real page snapshot is 10-15 KB
+
+
+def test_render_does_not_reintroduce_a_local_cap():
+    import inspect
+    from explore import render_context_md
+    body = inspect.getsource(render_context_md)
+    assert "ARIA_PAGE_MAX =" not in body          # it is module-level, shared with capture
+
+
+def test_spec_routes_finds_the_pages_a_spec_navigates_to():
+    from maintain import spec_routes
+    code = """
+      await page.goto(`${APP}/orders`, { waitUntil: 'domcontentloaded' });
+      await page.goto(`${APP}/orders/${orderId}/import-invoice`);
+      await page.goto('http://127.0.0.1:3000/settings?tab=x');
+      const r = await api.get(`${API}/orders`);
+    """
+    assert spec_routes(code) == {"/orders", "/orders/{id}/import-invoice", "/settings"}
+
+
+def test_spec_routes_ignores_api_calls_and_relative_junk():
+    from maintain import spec_routes
+    assert spec_routes("await api.get(`${API}/orders`);") == set()
+    assert spec_routes("await page.goto(`${APP}`);") == set()
+
+
+def test_truncation_at_capture_is_recorded_so_the_renderer_can_say_so():
+    """Capping at exactly ARIA_PAGE_MAX makes `len(a) > ARIA_PAGE_MAX` unreachable, so the
+    loss becomes invisible. The fact is recorded where it is still known."""
+    from explore import ARIA_PAGE_MAX, render_context_md
+    pages = [{"path": "/huge", "aria": "y" * ARIA_PAGE_MAX, "aria_truncated": True, "origin": "crawl"},
+             {"path": "/small", "aria": "- button \"Save\"", "origin": "crawl"}]
+    md = render_context_md({"alias": "t", "target_url": "http://x"}, pages, {}, {})
+    assert md.count("snapshot clipped") == 1
+
+
+def test_drop_aria_keeps_the_sections_the_scenario_prompt_cites():
+    from spec_gen import drop_aria
+    md = ("# M\n\n## Routes\n| / |\n\n## ARIA snapshots\n\n### `/a`\n```yaml\n" + "z" * 50_000
+          + "\n```\n\n## Backend endpoints\n### `/orders`\n- GET → 200: array\n\n## Auth Flow\n- x\n")
+    out = drop_aria(md)
+    assert "## Backend endpoints" in out and "GET → 200: array" in out
+    assert "## Auth Flow" in out
+    assert "snapshots omitted" in out
+    assert "zzz" not in out
+    assert len(out) < 500
+
+
+def test_drop_aria_is_a_noop_without_the_section():
+    from spec_gen import drop_aria
+    assert drop_aria("# M\n\n## Routes\n- /\n") == "# M\n\n## Routes\n- /\n"
+
+
+def test_scenario_generator_gets_the_endpoints_not_the_snapshots():
+    import inspect
+    import gen_scenarios
+    src = inspect.getsource(gen_scenarios)
+    assert "include_aria=False" in src
+
+
+def test_cache_key_digests_the_map_on_disk_not_a_truncated_view(tmp_path):
+    """load_app_context() truncates; digesting its output meant a re-crawl that changed
+    anything past the cut left every cached spec looking current."""
+    from spec_gen import app_map_fingerprint
+    webqa = tmp_path / ".web-qa"
+    webqa.mkdir()
+    ctx = webqa / "app.context.md"
+    ctx.write_text("A" * 100_000 + "\nTAIL-V1\n")
+    first = app_map_fingerprint(tmp_path)
+    ctx.write_text("A" * 100_000 + "\nTAIL-V2\n")          # only the far tail moved
+    assert app_map_fingerprint(tmp_path) != first
+
+
+def test_slice_openapi_never_drops_the_enum_block():
+    """`### Enum values` is a sibling of the endpoint groups and belongs to none of them, so
+    group-filtering removed it from every prompt — while the prompt told the model to take
+    allowed values from it."""
+    from spec_gen import slice_openapi
+    md = ("# M\n\n## Backend endpoints\n\n"
+          "### `/orders`\n- /orders — GET\n\n"
+          "### `/ghost`\n- /ghost — GET\n\n"
+          "### Enum values (WIRE values — never compare these to UI labels)\n\n"
+          "- `Order.status`: `paid`, `unpaid`\n\n## Auth Flow\n- x\n")
+    out = slice_openapi(md, {"/orders"})
+    assert "`Order.status`: `paid`, `unpaid`" in out
+    assert "/ghost" not in out
+    assert "showing 1 of 2 endpoint groups" in out       # the enum block is not a group
+    assert "## Auth Flow" in out

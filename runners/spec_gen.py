@@ -564,13 +564,20 @@ def slice_openapi(md: str, groups: set[str]) -> str:
         return md
     s, e = b
     header, _, body = md[s:e].partition("\n")
-    blocks = [blk for blk in re.split(r"(?m)^(?=### `)", body) if blk.strip().startswith("### `")]
-    kept = [blk for blk in blocks
+    blocks = [blk for blk in re.split(r"(?m)^(?=### )", body) if blk.strip().startswith("### ")]
+    # The enum block is a `###` sibling of the endpoint groups but belongs to no group. It was
+    # therefore filtered out of every single prompt — while the prompt told the model to take
+    # allowed values from it. Endpoint groups are sliced; the enum block always rides along.
+    enums = [blk for blk in blocks if blk.strip().startswith("### Enum values")]
+    endpoints = [blk for blk in blocks if blk not in enums]
+    kept = [blk for blk in endpoints
             if (m := re.match(r"### `([^`]+)`", blk.strip())) and m.group(1) in groups]
     if not kept:
         return md
-    note = f"_(showing {len(kept)} of {len(blocks)} endpoint groups — the ones this test case can call)_"
-    return md[:s] + header + "\n\n" + note + "\n\n" + "".join(kept).rstrip() + "\n" + md[e:]
+    note = (f"_(showing {len(kept)} of {len(endpoints)} endpoint groups — "
+            f"the ones this test case can call)_")
+    return (md[:s] + header + "\n\n" + note + "\n\n"
+            + "".join(kept).rstrip() + "\n\n" + "".join(enums).rstrip() + "\n" + md[e:])
 
 
 def _protect_manual(md: str, budget: int) -> str:
@@ -587,24 +594,51 @@ def _protect_manual(md: str, budget: int) -> str:
     return auto[:head] + "\n…(auto map truncated)\n\n" + manual
 
 
+def drop_aria(md: str) -> str:
+    """Remove the ARIA section entirely, leaving a pointer.
+
+    Whole-page snapshots make the map hundreds of KB. A caller that needs no selectors — the
+    scenario generator writes prose test cases, not locators — would otherwise spend its whole
+    budget on the ARIA section and head-truncate away `Backend endpoints` and `Enum values`,
+    which are exactly what its oracle rule cites."""
+    b = _section_bounds(md, "## ARIA snapshots")
+    if not b:
+        return md
+    s, e = b
+    header, _, _ = md[s:e].partition("\n")
+    return md[:s] + header + "\n\n_(snapshots omitted — not needed for this task)_\n" + md[e:]
+
+
+def map_files(proj_dir: Path) -> list[Path]:
+    webqa = proj_dir / ".web-qa"
+    main = webqa / "app.context.md"
+    return ([main] if main.is_file() else []) + sorted(webqa.glob("app.context.*.md"))
+
+
+def app_map_fingerprint(proj_dir: Path) -> str:
+    """Digest of the map as it is ON DISK.
+
+    Keying the spec cache on `load_app_context()` output digested a TRUNCATED map, so a
+    re-crawl that changed anything past the truncation point left every cached spec looking
+    current."""
+    return tc_hash("".join(p.read_text(encoding="utf-8") for p in map_files(proj_dir)))
+
+
 def load_app_context(proj_dir: Path, routes: set[str] | None = None,
-                     api_groups: set[str] | None = None) -> str:
+                     api_groups: set[str] | None = None,
+                     include_aria: bool = True) -> str:
     """Main app map plus any viewport-specific maps (app.context.<name>.md from
     `web-qa-explore --viewport <name>`) — mobile TCs need the mobile DOM, not guesses.
 
     `routes` (the routes of the TC being generated) slices the ARIA section down to the
     pages that TC visits. Without it the same 25 KB of snapshots rides along in every call
-    and the tail gets truncated away."""
-    webqa = proj_dir / ".web-qa"
-    parts: list[str] = []
-    main = webqa / "app.context.md"
-    if main.is_file():
-        parts.append(main.read_text(encoding="utf-8"))
-    for extra in sorted(webqa.glob("app.context.*.md")):
-        parts.append(extra.read_text(encoding="utf-8"))
+    and the tail gets truncated away. `include_aria=False` drops the section outright."""
+    parts = [p.read_text(encoding="utf-8") for p in map_files(proj_dir)]
     if not parts:
         return "(no app.context.md — run web-qa-explore first for grounded selectors)"
-    if routes:
+    if not include_aria:
+        parts = [drop_aria(p) for p in parts]
+    elif routes:
         parts = [slice_aria(p, routes) for p in parts]
     if api_groups:
         parts = [slice_openapi(p, api_groups) for p in parts]
@@ -719,7 +753,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     # Per-TC below (ARIA sliced to the routes that TC visits). The FULL map still keys the
     # cache: a re-crawl that changes any route must invalidate every spec, not just the
     # ones whose own slice moved.
-    app_map_digest = load_app_context(proj_dir)
+    app_map_digest = app_map_fingerprint(proj_dir)
     seed = load_seed(proj_dir)
     seed_section = seed_prompt_section(seed)
     test_timeout_ms = read_test_timeout(webqa)
