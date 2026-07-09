@@ -34,6 +34,12 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   use: {
     baseURL: 'http://127.0.0.1:3000',
+    // Without this, a locator that never matches makes `click`/`fill` wait until the
+    // 30s TEST timeout, and playwright reports a bare "Test timeout of 30000ms
+    // exceeded." with no locator, no step, nothing. Bounding the ACTION instead
+    // turns the same failure into "locator not found: getByLabel(/Price/i)".
+    actionTimeout: 10_000,
+    navigationTimeout: 15_000,
     // CI: trace on retry only; locally there are no retries — keep traces for failures
     trace: process.env.CI ? 'on-first-retry' : 'retain-on-failure',
     screenshot: 'only-on-failure',

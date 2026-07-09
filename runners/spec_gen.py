@@ -424,6 +424,23 @@ def validate_spec(webqa: Path, out_path: Path) -> str | None:
     return (proc.stderr or proc.stdout)[-1500:]
 
 
+MANUAL_MARKER = "<!-- manual -->"
+
+
+def _protect_manual(md: str, budget: int) -> str:
+    """Truncate the auto-generated head, never the hand-written tail below MANUAL_MARKER."""
+    if len(md) <= budget:
+        return md
+    i = md.find(MANUAL_MARKER)
+    if i < 0:
+        return md[:budget] + "\n…(truncated)"
+    auto, manual = md[:i], md[i:]
+    head = max(0, budget - len(manual) - 20)
+    if head <= 0:                      # a manual section larger than the whole budget: keep it
+        return manual
+    return auto[:head] + "\n…(auto map truncated)\n\n" + manual
+
+
 def load_app_context(proj_dir: Path) -> str:
     """Main app map plus any viewport-specific maps (app.context.<name>.md from
     `web-qa-explore --viewport <name>`) — mobile TCs need the mobile DOM, not guesses."""
@@ -436,14 +453,14 @@ def load_app_context(proj_dir: Path) -> str:
         parts.append(extra.read_text(encoding="utf-8"))
     if not parts:
         return "(no app.context.md — run web-qa-explore first for grounded selectors)"
-    # a huge main map must not tail-truncate the viewport maps appended after it
-    if len(parts) > 1:
-        main_budget = MAX_CONTEXT_CHARS * 2 // 3
-        if len(parts[0]) > main_budget:
-            parts[0] = parts[0][:main_budget] + "\n…(main map truncated)"
+    # The manual section is the ONLY hand-written part of the map ("business rules the
+    # crawler can't see"). It lives at the tail, so a head-truncation dropped it entirely —
+    # web-qa invited the user to write knowledge there and then never showed it to the model.
+    parts = [_protect_manual(p, MAX_CONTEXT_CHARS * 2 // 3 if len(parts) > 1 else MAX_CONTEXT_CHARS)
+             for p in parts]
     ctx = "\n\n".join(parts)
     if len(ctx) > MAX_CONTEXT_CHARS:
-        ctx = ctx[:MAX_CONTEXT_CHARS] + "\n…(truncated)"
+        ctx = _protect_manual(ctx, MAX_CONTEXT_CHARS)
     return ctx
 
 

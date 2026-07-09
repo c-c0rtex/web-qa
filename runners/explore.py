@@ -467,6 +467,57 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
     return pages
 
 
+def sidecar_path(out: Path) -> Path:
+    """app.context.md → app.context.json — the machine-readable twin the next crawl
+    merges against. Parsing the rendered markdown back would be fragile."""
+    return out.with_suffix(".json")
+
+
+def load_prev_pages(out: Path) -> list[dict]:
+    p = sidecar_path(out)
+    if not p.is_file():
+        return []
+    try:
+        return json.loads(p.read_text(encoding="utf-8")).get("pages", [])
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def page_key(p: dict) -> str:
+    return p.get("path") or p.get("url") or ""
+
+
+def merge_pages(prev: list[dict], fresh: list[dict], today: str) -> tuple[list[dict], dict]:
+    """Union by route — a crawl that did not reach a route must not delete it.
+
+    The auto part of app.context.md is rewritten from scratch on every crawl, so a lower
+    --max-pages, an expired session or one slow page silently replaced a good map with a
+    worse one. Every spec generated afterwards then guessed its selectors. Carrying the
+    previous entry over (marked stale) keeps ground truth that specs already depend on."""
+    fresh_by = {page_key(p): p for p in fresh if page_key(p)}
+    merged = list(fresh)
+    carried: list[str] = []
+    for p in prev:
+        k = page_key(p)
+        if not k or k in fresh_by or p.get("uncrawled"):
+            continue
+        q = dict(p)
+        q["stale_since"] = p.get("stale_since") or today
+        carried.append(k)
+        merged.append(q)
+    prev_keys = {page_key(p) for p in prev}
+    lost_aria = sorted(
+        page_key(p) for p in prev
+        if p.get("aria") and page_key(p) in fresh_by and not fresh_by[page_key(p)].get("aria")
+    )
+    report = {
+        "carried_over": sorted(carried),
+        "new_routes": sorted(k for k in fresh_by if k and k not in prev_keys),
+        "lost_aria": lost_aria,
+    }
+    return merged, report
+
+
 def annotate_origins(pages: list[dict], mined: list[dict]) -> list[dict]:
     """Mark each crawled page with where the route is known from, and append rows for
     code-declared routes the crawl never reached. Those still belong in the map — and in
@@ -478,6 +529,10 @@ def annotate_origins(pages: list[dict], mined: list[dict]) -> list[dict]:
             continue
         tpl = as_template(p["path"].split("?")[0])
         seen_tpls.add(tpl)
+        if p.get("stale_since"):
+            # carried over from an earlier crawl — say so rather than claim we just saw it
+            p["origin"] = f"stale:{p['stale_since']}"
+            continue
         p["origin"] = "crawl+code" if tpl in mined_by_tpl else "crawl"
     extra = [{"path": m["path"], "origin": f"code:{m['source']}", "uncrawled": True}
              for tpl, m in mined_by_tpl.items() if tpl not in seen_tpls]
@@ -548,21 +603,22 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
 
     # ===== ARIA snapshots =====
     lines.append("## ARIA snapshots (role/name — ground truth for getByRole)\n")
-    aria_budget = 8000
-    used = 0
-    any_aria = False
-    for p in pages:
-        a = p.get("aria")
-        if not a:
-            continue
-        if used + len(a) > aria_budget:
-            lines.append("_(aria budget reached — remaining routes omitted)_")
-            break
-        any_aria = True
-        used += len(a)
-        lines.append(f"### `{p.get('path', '')}`\n```yaml\n{a}\n```")
-    if not any_aria:
+    # Budget shared EVENLY, not first-come. Spending it in crawl order gave the first ten
+    # routes a full snapshot and the rest — including the most-tested sections — nothing at
+    # all, so their specs guessed every selector and hung on the first miss. A short snapshot
+    # everywhere beats a long one for a tenth of the app.
+    ARIA_BUDGET = 16000
+    ARIA_MIN = 400
+    with_aria = [p for p in pages if p.get("aria")]
+    if not with_aria:
         lines.append("_(no aria snapshots captured)_")
+    else:
+        per_page = max(ARIA_MIN, ARIA_BUDGET // len(with_aria))
+        for p in with_aria:
+            a = p["aria"]
+            clipped = a[:per_page]
+            note = "\n# …(snapshot clipped)" if len(a) > per_page else ""
+            lines.append(f"### `{p.get('path', '')}`\n```yaml\n{clipped}{note}\n```")
     lines.append("")
 
     # ===== Backend endpoints =====
@@ -637,6 +693,9 @@ def main() -> int:
     ap.add_argument("--email")
     ap.add_argument("--password")
     ap.add_argument("--max-pages", type=int, default=30)
+    ap.add_argument("--fresh", action="store_true",
+                    help="rebuild the map from this crawl alone; do not carry over routes "
+                         "the crawl did not reach (default: merge with the previous map)")
     ap.add_argument("--viewport", help="named viewport from config `viewports` "
                                        "(non-default writes app.context.<name>.md)")
     ap.add_argument("--interactive", action="store_true",
@@ -672,24 +731,48 @@ def main() -> int:
     # without ids, but still land in the map (and the coverage denominator) via annotate
     seeds = [m["path"] for m in mined if "{" not in m["path"]]
 
+    if mined and args.max_pages < len(mined):
+        # the route count is known BEFORE the crawl — a cap below it guarantees blind spots
+        print(f"[explore] WARNING: --max-pages {args.max_pages} < {len(mined)} routes mined "
+              f"from source. Routes beyond the cap get no DOM, and specs for them will guess "
+              f"their selectors. Raise --max-pages to at least {len(mined)}.", file=sys.stderr)
+
     print(f"[explore] crawling {target} (max_pages={args.max_pages}, viewport={label}"
           f"{', interactive' if args.interactive else ''})", file=sys.stderr)
     pages = crawl(target, storage, max_pages=args.max_pages, vp_entry=entry,
                   seed_paths=seeds, interactive=args.interactive)
     crawled_count = len(pages)
     print(f"[explore] crawled {crawled_count} pages", file=sys.stderr)
+
+    out_name = f"app.context{suffix.replace('@', '.')}.md" if suffix else "app.context.md"
+    out = Path(proj["path"]) / ".web-qa" / out_name
+
+    merge_report = {"carried_over": [], "new_routes": [], "lost_aria": []}
+    if not args.fresh:
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        pages, merge_report = merge_pages(load_prev_pages(out), pages, today)
+    if merge_report["carried_over"]:
+        print(f"[explore] {len(merge_report['carried_over'])} route(s) not reached this crawl, "
+              f"carried over from the previous map: "
+              f"{', '.join(merge_report['carried_over'])}", file=sys.stderr)
+    if merge_report["lost_aria"]:
+        # a route we DID reach but whose snapshot vanished — the map got worse, say it out loud
+        print(f"[explore] REGRESSION: aria snapshot lost for "
+              f"{', '.join(merge_report['lost_aria'])}", file=sys.stderr)
+
     pages = annotate_origins(pages, mined)
 
     md = render_context_md(proj, pages, openapi, user_me)
     if suffix:
         md = md.replace("— App Context", f"— App Context ({entry.get('name')} viewport)", 1)
-    out_name = f"app.context{suffix.replace('@', '.')}.md" if suffix else "app.context.md"
-    out = Path(proj["path"]) / ".web-qa" / out_name
     existing = out.read_text() if out.is_file() else None
     out.write_text(merge_manual_section(md, existing))
+    sidecar_path(out).write_text(
+        json.dumps({"generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "pages": pages}, ensure_ascii=False, indent=1), encoding="utf-8")
     print(json.dumps({"alias": args.alias, "pages_crawled": crawled_count,
                       "routes_mined": len(mined), "out": str(out),
-                      "size": out.stat().st_size}, ensure_ascii=False))
+                      "size": out.stat().st_size, "merge": merge_report}, ensure_ascii=False))
     return 0
 
 

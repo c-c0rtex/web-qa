@@ -1126,3 +1126,70 @@ def test_missing_role_is_not_an_error():
     role_branch = src[src.index("except SystemExit"):src.index("body_hash = tc_hash")]
     assert "skipped_missing_role" in role_branch
     assert 'summary["errors"]' not in role_branch
+
+
+# ------------------------------------------------- app map: merge, aria fairness, manual
+
+def test_merge_pages_carries_over_unreached_routes():
+    from explore import merge_pages
+    prev = [{"path": "/orders", "aria": "table"}, {"path": "/items", "aria": "grid"}]
+    fresh = [{"path": "/orders", "aria": "table2"}]          # crawl stopped early
+    merged, rep = merge_pages(prev, fresh, "2026-07-09")
+    paths = {p["path"] for p in merged}
+    assert paths == {"/orders", "/items"}             # nothing silently deleted
+    carried = next(p for p in merged if p["path"] == "/items")
+    assert carried["stale_since"] == "2026-07-09"
+    assert rep["carried_over"] == ["/items"]
+    assert next(p for p in merged if p["path"] == "/orders")["aria"] == "table2"  # fresh wins
+
+
+def test_merge_pages_reports_lost_aria_as_regression():
+    from explore import merge_pages
+    prev = [{"path": "/orders", "aria": "table"}]
+    fresh = [{"path": "/orders"}]                            # reached, but snapshot vanished
+    _, rep = merge_pages(prev, fresh, "2026-07-09")
+    assert rep["lost_aria"] == ["/orders"]
+    assert rep["carried_over"] == []
+
+
+def test_merge_pages_reports_new_routes_and_ignores_uncrawled():
+    from explore import merge_pages
+    prev = [{"path": "/a", "uncrawled": True}]
+    fresh = [{"path": "/b"}]
+    merged, rep = merge_pages(prev, fresh, "2026-07-09")
+    assert rep["new_routes"] == ["/b"]
+    assert [p["path"] for p in merged] == ["/b"]             # code-only rows are re-derived
+
+
+def test_annotate_origins_keeps_stale_marking():
+    from explore import annotate_origins
+    pages = [{"path": "/orders", "stale_since": "2026-07-01"}, {"path": "/new"}]
+    out = annotate_origins(pages, [])
+    assert out[0]["origin"] == "stale:2026-07-01"
+    assert out[1]["origin"] == "crawl"
+
+
+def test_aria_budget_is_shared_evenly_not_first_come():
+    from explore import render_context_md
+    pages = [{"path": f"/r{i}", "aria": "x" * 800, "origin": "crawl"} for i in range(30)]
+    md = render_context_md({"alias": "t", "target_url": "http://x"}, pages, {}, {})
+    # every route gets a snapshot; none is silently omitted
+    assert md.count("```yaml") == 30
+    assert "aria budget reached" not in md
+    assert "/r29" in md
+
+
+def test_protect_manual_survives_truncation():
+    from spec_gen import _protect_manual
+    manual = "<!-- manual -->\n- admins only may delete\n"
+    md = "A" * 5000 + manual
+    out = _protect_manual(md, 1000)
+    assert manual.strip() in out                              # the hand-written rule survives
+    assert "(auto map truncated)" in out
+    assert len(out) <= 1000 + len(manual)
+
+
+def test_protect_manual_noop_when_within_budget():
+    from spec_gen import _protect_manual
+    md = "short map"
+    assert _protect_manual(md, 1000) == md

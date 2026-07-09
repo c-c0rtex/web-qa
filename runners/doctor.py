@@ -200,8 +200,18 @@ def check_project(results: list[dict], alias: str) -> None:
           "" if scen else "web-qa-generate --diff/--task, or write scenarios/*.md")
 
     # specs runner setup
-    if (webqa / "playwright.config.ts").is_file() and (webqa / "node_modules" / "@playwright" / "test").is_dir():
+    pw_config = webqa / "playwright.config.ts"
+    if pw_config.is_file() and (webqa / "node_modules" / "@playwright" / "test").is_dir():
         check(results, "specs runner", OK, "playwright.config.ts + @playwright/test present")
+        # A config without actionTimeout turns every unmatched locator into a bare
+        # "Test timeout of 30000ms exceeded." — no locator, no step. Diagnostics vanish
+        # exactly where they are needed most: form fills in mutating specs.
+        if "actionTimeout" in pw_config.read_text(encoding="utf-8"):
+            check(results, "actionTimeout", OK, "set — locator misses name the locator")
+        else:
+            check(results, "actionTimeout", WARN, "not set in playwright.config.ts",
+                  "add `actionTimeout: 10_000` under `use:` — otherwise a missing locator "
+                  "hangs until the test timeout and reports nothing (see the template)")
     else:
         check(results, "specs runner", WARN, "not set up",
           "see SKILL.md 'Per-project specs runner setup' (needed for specs/matrix specs stage)")
