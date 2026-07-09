@@ -93,6 +93,15 @@ RULES:
   data. A TC without it is treated as mutating (runners never guess intent from prose)
 - Frontend paths in backticks: `/orders`. Backend calls as: GET `/orders/facets`
 - Expected bullets must be OBSERVABLE on the page (visible text, table columns, counters)
+- CORRECTNESS, not presence. Any TC whose page displays data the app DERIVED (a KPI, a total,
+  a count, a ranking, a currency sum) MUST have at least one Expected bullet asserting that
+  the displayed value is RIGHT, and naming where that truth comes from. "KPI tiles show
+  numbers" is worthless — a broken aggregate happily shows `0`. Write instead: "«Unpaid to
+  factory» equals the number of invoices with status unpaid, per GET `/invoices`"
+- The truth must come from the PRIMARY collections, never from the same aggregate/summary
+  endpoint the page itself calls — if that endpoint's aggregation is broken, the check passes
+  on a broken feature. If no independent source exists, say so in the bullet and assert an
+  invariant instead (ordering, sum of parts equals the displayed total)
 - If behaviour differs per role, write SEPARATE TCs annotated `**Role:** <name>` — never mix
   two roles' expectations in one TC. Unannotated TCs run under the default account
 - Write steps/expected in {language}; keep ids/paths/technical terms as-is

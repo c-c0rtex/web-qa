@@ -1092,3 +1092,37 @@ def test_gen_scenarios_prompt_format_survives_new_placeholder():
     out = PROMPT.format(app_context="ctx", coverage_section="cov", roles_section="",
                         source_section="src", prefix="G", language="English")
     assert "cov" in out and "TC-G1" in out
+
+
+# --------------------------------------------------- budget stop vs generation failure
+
+def test_projected_total_needs_at_least_one_finished_job(ledger):
+    from spec_gen import projected_total
+    assert projected_total(20, 0) is None
+    assert projected_total(0, 5) is None
+    ledger._spent_usd = 0.60
+    assert projected_total(20, 3) == pytest.approx(4.0)   # 0.20/spec × 20
+
+
+def test_budget_stop_is_not_a_spec_failure_shape():
+    """A TC the budget guard blocked never reached the model: it must not look like a
+    spec the generator failed to write."""
+    import inspect
+
+    import spec_gen
+    src = inspect.getsource(spec_gen.gen_specs)
+    # the budget branch is handled before the generic Exception -> .FAILED branch
+    assert src.index("except LLMBudgetExceeded") < src.index("except Exception")
+    budget_branch = src[src.index("except LLMBudgetExceeded"):src.index("except Exception")]
+    assert "skipped_over_budget" in budget_branch
+    assert "marker.write_text" not in budget_branch
+
+
+def test_missing_role_is_not_an_error():
+    import inspect
+
+    import spec_gen
+    src = inspect.getsource(spec_gen.gen_specs)
+    role_branch = src[src.index("except SystemExit"):src.index("body_hash = tc_hash")]
+    assert "skipped_missing_role" in role_branch
+    assert 'summary["errors"]' not in role_branch

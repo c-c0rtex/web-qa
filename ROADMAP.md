@@ -6,6 +6,35 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.4.2 (specs that test data, not decoration)
+
+A generated spec asserted that the dashboard's KPI tiles *rendered*. They rendered wrong
+numbers, and the test was green — on a bug already written down in the project's own
+`BUGS.md`. Presence is not correctness, and the prompts asked for presence.
+
+- **Independent-oracle rule** — a TC over derived data (a KPI, a total, a count, a ranking)
+  must now compute the expected value from the backend's **primary** collections and assert
+  the UI equals it. Deriving it from the same aggregate endpoint the page calls is explicitly
+  forbidden: when that aggregation is the bug, UI and oracle are wrong together and the test
+  passes on a broken feature
+- **`page.request` is no longer barred from oracle reads.** The UI-FIRST rule allowed API
+  calls only for auth, fixtures, and post-action verification — so on a read-only page the
+  model correctly concluded it must not check the numbers at all
+- **Presence assertions no longer count** — `toBeVisible` does not cover an Expected bullet
+  that names a value; the spec must assert the value
+- Validated end to end: the old dashboard spec passed on the broken dashboard; the
+  regenerated one fails with `tile shows 10, reference count is 14`
+
+Reporting stopped lying about what happened:
+
+- **A budget stop is not a spec failure** — TCs blocked by `LLMBudgetExceeded` never reached
+  the model, so they no longer get a `.FAILED` marker (which means "the generator wrote a bad
+  spec"). They land in `skipped_over_budget`, with a resume command
+- **A missing role is not an error** — a TC declaring a role absent from `projects.json` costs
+  nothing and is fixed by a human; it moved out of `errors` into `skipped_missing_role`
+- **Cost is projected early** — the run warns as soon as the extrapolated total exceeds the
+  ceiling, instead of running out on the last test case of twenty
+
 ## Shipped — v0.4.1 (bounded token spend)
 
 Every LLM call web-qa makes is a headless `claude -p` session, not a single API request.

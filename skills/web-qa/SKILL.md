@@ -158,6 +158,8 @@ Each of those calls is a **headless `claude -p` session, not a single API reques
 
 - Every run reports its real spend: the summary JSON carries `"llm": {"spent_usd", "calls", "budget_usd"}`, and each call prints `[llm] $… this call, $… of $… budget` to stderr. **Quote the actual number when you report a run** — never estimate it.
 - `web-qa-generate` answers only the task it was given. It cannot know what earlier runs covered, so **always read `uncovered_routes` from its summary and tell the user** — that is how a whole route (a dashboard) stays untested for months. Close gaps with `--cover-gaps`.
+- `skipped_missing_role` in a spec-gen summary is a **registry gap, not a failure**: the TC declares a role `projects.json` has no account for. It cost nothing. Report it and ask the user to add `roles: [{name, email, password}]`.
+- `skipped_over_budget` means those TCs **never reached the model** — no `.FAILED` marker is written for them. Resume with a higher `--max-usd` only after the user approves.
 - Before a large fan-out (>10 TCs), tell the user roughly what it will cost and let them set `--max-usd`. Generate in batches with `--tc <id>` when unsure.
 - `LLMBudgetExceeded` is not a bug and not a transient failure. **Never retry it, never raise the ceiling on your own** — report the spend and ask.
 - Do not raise `--workers` or switch `WEBQA_CLAUDE_MODEL` to a frontier model without the user asking. If specs come out poor on `sonnet`, say so and propose the upgrade; don't do it silently. Note `WEBQA_CLAUDE_MODEL` is a **global** override — setting it also drags `generate` off `opus`.
@@ -249,7 +251,8 @@ pixel diff. **Visual judgment is YOUR job as the orchestrating agent:**
 | `web-qa-spec-gen` → «claude CLI not found» | Claude Code CLI must be on PATH (`which claude`) |
 | Specs mass-fail on selectors | App map is stale → `web-qa-explore`, then `web-qa-spec-gen --force`, then `web-qa-maintain` |
 | Spec generation silently missing a TC | Check `specs/*.FAILED` markers; raise `WEBQA_GEN_TIMEOUT` for complex TCs |
-| `LLMBudgetExceeded` | The run hit `WEBQA_MAX_USD` (default $5). Report `summary.llm.spent_usd` and ask the user before raising it — see **Token budget**. Not a retryable failure |
+| `LLMBudgetExceeded` | The run hit `WEBQA_MAX_USD` (default $5). Report `summary.llm.spent_usd` and ask the user before raising it — see **Token budget**. Not a retryable failure. The blocked TCs land in `skipped_over_budget`, never in `errors`, and get no `.FAILED` marker |
+| Specs assert only that elements exist | A spec that checks `toBeVisible()` on a KPI passes on a KPI showing a wrong number. Every TC over derived data must compare the displayed value against a truth computed from **primary** collections — never from the aggregate endpoint the page itself calls. Both prompts enforce this; if a spec still does presence-only, the TC's Expected bullets were presence-only — fix the scenario, not the spec |
 | `.FAILED` markers all say «claude CLI failed (exit 1)» | The CLI itself refused — usually the subscription usage limit. The message now carries the CLI's own stdout; read it |
 | `npm install` from `.web-qa` polluted the app's package.json | `.web-qa` had no own package.json — create it (see setup), reinstall inside, remove the stray dep from the app |
 | Visual diffs after a legitimate UI change | `web-qa-run --update-baseline` |

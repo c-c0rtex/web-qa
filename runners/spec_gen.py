@@ -75,7 +75,11 @@ REQUIREMENTS:
 - Use a single `test('TC-XXX: <name>', async ({{ page, context }}) => {{ ... }})` block
 - Authenticate at the start of the test following the AUTH FLOW above verbatim
 - Convert each step in the TC to one or more Playwright actions
-- Add `expect(...)` assertions covering the Expected bullets
+- Add `expect(...)` assertions covering the Expected bullets. A presence assertion
+  (`toBeVisible`, `toHaveCount`) does NOT cover a bullet that names a value, a number, a
+  count or a piece of text — assert the VALUE itself (`toHaveText`, `toContainText`,
+  `toHaveValue`, or parse the number and compare it). "The tile renders" is not a test
+  that the tile is right
 - Selector priority: 1) `getByTestId` when the APP MAP shows a data-testid for the element,
   2) `getByRole` with the accessible name (the ARIA snapshots in the APP MAP are ground truth
   for role/name), 3) `getByLabel` / `getByText`. NEVER CSS classes, XPath or positional nth()
@@ -86,11 +90,29 @@ REQUIREMENTS:
 - NEVER use `waitForLoadState('networkidle')` anywhere. Web-first assertions
   (`await expect(locator).toBeVisible()`) auto-wait and are the correct sync point; for
   navigation waits use `page.waitForURL(...)`
-- For backend assertions: `const r = await page.request.get(...); expect(r.status()).toBe(200)`
 - Mock EXTERNAL third-party dependencies only (payments, outside APIs). NEVER mock or stub
   your own app's backend — the test must exercise the real stack
 - Do not hardcode IDs — use `?` if TC is generic about which entity, or pick a plausible id
 - Keep the spec self-contained; no external helpers
+
+DATA CORRECTNESS RULE (a page that renders is not a page that is right):
+- When an Expected bullet names a value the app DERIVES from data — a KPI, a total, a count,
+  a ranking, a currency sum — compute the expected value inside the test from the backend's
+  PRIMARY collections and assert the UI shows exactly that:
+      const r = await page.request.get('{backend_url}/<primary-collection>');
+      expect(r.status()).toBe(200);
+      const rows = await r.json();
+      const expected = rows.filter(...).reduce(...);      // derive the truth yourself
+      await expect(page.getByTestId('<tile>')).toHaveText(String(expected));
+- NEVER derive the expected value from the SAME aggregate/summary endpoint the page itself
+  calls. That endpoint is part of what is under test: if its aggregation is wrong, the UI and
+  your oracle are wrong together and the test passes on a broken feature. Go to the primary
+  collections the aggregate is built from
+- Zero, empty and "—" are values a broken aggregate loves to return. Asserting "a number is
+  rendered" or "no NaN appears" catches none of it
+- If the API genuinely exposes no independent oracle, say so in a comment and assert the
+  strongest invariant you can instead (ordering, non-negativity, sum of the parts equals the
+  displayed total, count of rows equals a displayed counter) — never fall back to `toBeVisible`
 
 UI-FIRST RULE (what makes the spec worth anything):
 - Every user-visible step of the TC MUST be performed through the UI — real clicks on real
@@ -98,7 +120,8 @@ UI-FIRST RULE (what makes the spec worth anything):
 - Doing the action under test via `page.request` instead of the UI is a SPEC BUG: the test
   goes green while the actual user path may be broken
 - `page.request` / API calls are allowed ONLY for: authentication, creating/deleting test
-  data (setup/teardown), and side-verification of state AFTER a UI action
+  data (setup/teardown), side-verification of state AFTER a UI action, and reading an
+  INDEPENDENT ORACLE to check a displayed value against (see DATA CORRECTNESS RULE)
 
 MUTATING DATA POLICY (applies when the TC creates/edits/deletes data):
 - NEVER mutate pre-existing data. The test must create its OWN target entity via the backend API
@@ -279,6 +302,15 @@ def _check_budget() -> None:
                 f"ceiling ${budget:.2f}. Nothing was sent to the model. Raise WEBQA_MAX_USD "
                 f"(or --max-usd) to continue, or 0 to disable the guard."
             )
+
+
+def projected_total(total_jobs: int, done_jobs: int) -> float | None:
+    """Extrapolate the run's final cost from what has been spent so far.
+    None until at least one job finished — an average over zero jobs says nothing."""
+    if done_jobs <= 0 or total_jobs <= 0:
+        return None
+    spent = llm_spend()["spent_usd"]
+    return spent / done_jobs * total_jobs
 
 
 def _record_spend(usd: float) -> float:
@@ -500,7 +532,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     # config `live_probe: false` disables the live locator check (e.g. CI without a stand)
     live_probe = live_probe and proj.get("live_probe") is not False
     summary = {"generated": [], "skipped_cached": [], "skipped_passive": [], "errors": [],
-               "probe_warnings": []}
+               "probe_warnings": [], "skipped_missing_role": [], "skipped_over_budget": []}
     jobs: list[tuple[str, str, Path, str, str | None]] = []  # (tc_key, prompt, out_path, body_hash, role)
 
     for md in md_files:
@@ -519,10 +551,9 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 try:
                     tc_email, tc_password = resolve_credentials(proj, None, None, role=declared[0])
                 except SystemExit:
-                    summary["errors"].append({
-                        "tc": tc_key,
-                        "error": f"TC declares role {declared[0]!r} but projects.json has no such role",
-                    })
+                    # A registry gap, not a generation failure: costs nothing, fixed by the
+                    # human, and must not be buried among real errors or leave a .FAILED marker
+                    summary["skipped_missing_role"].append({"tc": tc_key, "role": declared[0]})
                     continue
             else:
                 tc_email, tc_password = login_email, login_password
@@ -547,12 +578,20 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
             )
             jobs.append((tc_key, prompt, out_path, body_hash, declared[0] if declared else None))
 
+    if summary["skipped_missing_role"]:
+        gaps = ", ".join(f"{r['tc']} (role {r['role']!r})" for r in summary["skipped_missing_role"])
+        print(f"[gen] {len(summary['skipped_missing_role'])} TC(s) skipped, no such role in "
+              f"projects.json — add `roles: [{{name, email, password}}]`: {gaps}",
+              file=sys.stderr, flush=True)
+
+    budget_stop: str | None = None
     if jobs:
         budget = llm_budget_usd()
         cap = f"${budget:.2f} budget" if budget > 0 else "budget guard OFF"
         print(f"[gen] {len(jobs)} spec(s) to generate, {workers} worker(s), {cap}", flush=True)
         hash_by_key = {k: h for k, _, _, h, _ in jobs}
         path_by_key = {k: o for k, _, o, _, _ in jobs}
+        projected_warned = False
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             futures = {pool.submit(gen_one, k, p, o, webqa, proj, live_probe, role): k
                        for k, p, o, _, role in jobs}
@@ -563,6 +602,13 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 warning = None
                 try:
                     _, err, warning = fut.result()
+                except LLMBudgetExceeded as e:
+                    # Nothing was sent to the model. A .FAILED marker means "the generator
+                    # produced a bad spec" — writing one here libels the generator and buries
+                    # the real cause under one marker per remaining TC.
+                    summary["skipped_over_budget"].append(tc_key)
+                    budget_stop = budget_stop or str(e)
+                    continue
                 except Exception as e:
                     err = str(e)
                 if warning:
@@ -581,8 +627,29 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                     marker.write_text(f"{tc_key}\n{err}\n", encoding="utf-8")
                     print(f"[gen] FAIL {tc_key}: {err[:200]}", file=sys.stderr, flush=True)
 
+                # Warn while there is still something to decide. Running out of budget on the
+                # last TC of twenty is a worse outcome than being told at the third.
+                if not projected_warned and budget > 0:
+                    done = len(summary["generated"]) + len(summary["errors"])
+                    projected = projected_total(len(jobs), done)
+                    if done >= 2 and projected is not None and projected > budget:
+                        projected_warned = True
+                        print(f"[gen] PROJECTION ${projected:.2f} for {len(jobs)} spec(s) exceeds "
+                              f"the ${budget:.2f} ceiling — raise --max-usd now or expect a stop",
+                              file=sys.stderr, flush=True)
+
     cache_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False))
     summary["llm"] = llm_spend()
+
+    if summary["skipped_over_budget"]:
+        spent = summary["llm"]["spent_usd"]
+        left = summary["skipped_over_budget"]
+        print(f"\n[gen] BUDGET STOP — {budget_stop}", file=sys.stderr)
+        print(f"[gen] {len(left)} TC(s) never reached the model (no .FAILED written): "
+              f"{', '.join(left)}", file=sys.stderr)
+        # the cache holds what succeeded, so a resume regenerates only what is missing
+        print(f"[gen] resume (keep your other flags): web-qa-spec-gen --alias {alias} "
+              f"--max-usd {spent + 0.5 * max(1, len(left)):.2f}", file=sys.stderr, flush=True)
     return summary
 
 
@@ -607,7 +674,9 @@ def main() -> int:
     res = gen_specs(args.alias, all_tcs=args.all, only_tc=args.tc, force=args.force,
                     workers=args.workers, live_probe=not args.no_probe)
     print(json.dumps(res, indent=2, ensure_ascii=False))
-    return 0 if not res.get("errors") else 1
+    # A budget stop leaves work undone, so it is not success — but it is not an error either,
+    # and `skipped_missing_role` is a registry gap the human fixes, never a failed run.
+    return 0 if not (res.get("errors") or res.get("skipped_over_budget")) else 1
 
 
 if __name__ == "__main__":
