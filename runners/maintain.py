@@ -28,7 +28,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from explore import load_project, viewport_env
-from spec_gen import call_claude, validate_spec, load_app_context, load_seed, postprocess_spec, seed_prompt_section
+from spec_gen import (DEFAULT_MAX_USD, call_claude, llm_spend, load_app_context, load_seed,
+                      postprocess_spec, seed_prompt_section, validate_spec)
 
 FIX_PROMPT = """You are fixing a FAILING Playwright TypeScript spec for an existing web app.
 The app itself is considered correct — the spec has wrong selectors, timing or assertions.
@@ -308,7 +309,12 @@ def main() -> int:
     ap.add_argument("--alias", required=True)
     ap.add_argument("--report", help="existing playwright-results.json; default: run tests now")
     ap.add_argument("--apply", action="store_true", help="overwrite specs in place (keeps .bak)")
-    ap.add_argument("--workers", type=int, default=3, help="parallel claude calls")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel claude calls (default 1). Concurrent calls all miss the "
+                         "shared prompt cache — each extra worker buys wall-clock with money")
+    ap.add_argument("--max-usd", type=float, default=None,
+                    help=f"hard LLM spend ceiling for this run (default {DEFAULT_MAX_USD:.2f}, "
+                         f"0 = no guard). Also settable via WEBQA_MAX_USD")
     ap.add_argument("--pw-workers", type=int, help="playwright --workers for the test run")
     ap.add_argument("--with-screens", action="store_true",
                     help="list failure screenshot paths in the summary JSON so the "
@@ -317,6 +323,8 @@ def main() -> int:
                     help="before healing, re-run a signature-clean failing spec N times; "
                          "if it ever passes it's a flake (retry, don't heal). Default 0 (off)")
     args = ap.parse_args()
+    if args.max_usd is not None:
+        os.environ["WEBQA_MAX_USD"] = str(args.max_usd)
 
     proj = load_project(args.alias)
     proj_dir = Path(proj["path"])
@@ -396,6 +404,7 @@ def main() -> int:
         summary["screens"] = {fname: failure_artifacts(webqa, fname)["screens"]
                               for fname in fails}
 
+    summary["llm"] = llm_spend()
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if not summary["errors"] else 1
 

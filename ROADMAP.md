@@ -6,6 +6,26 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.4.1 (bounded token spend)
+
+Every LLM call web-qa makes is a headless `claude -p` session, not a single API request.
+Left at the CLI's own defaults, a 30-test-case fan-out drained a 5-hour subscription
+window in under seven minutes. The generator is now cheap and bounded by construction:
+
+- **Tools off by default** (`WEBQA_CLAUDE_TOOLS=""`) — `app.context.md` is already inlined
+  in the prompt, so the agentic loop that re-crawled the repo bought nothing and cost the
+  most. This is the single largest saving
+- **`sonnet` + `medium` effort by default** — spec generation is a mechanical translation;
+  it no longer inherits whatever frontier model the user's interactive CLI is pinned to
+- **Real spend metering and a hard ceiling** — `--output-format json` yields the CLI's own
+  `total_cost_usd`; `WEBQA_MAX_USD` (default $5, `--max-usd` per run, `0` disables) raises
+  `LLMBudgetExceeded` *before* the next call reaches the model. Every runner's summary JSON
+  now carries `"llm": {spent_usd, calls, budget_usd}`
+- **Serial by default** (`--workers 1`) — concurrent `claude -p` calls all miss the shared
+  prompt cache, since none can read what the others are still writing
+- **Usage-limit failures are legible** — the CLI reports exhaustion on stdout, which the
+  error path discarded; `*.FAILED` markers said only `exit 1`
+
 ## Shipped — v0.4.0 (signal quality & drag-and-drop)
 
 - **Flake quarantine** — `quarantine_after: N`: a spec that flips pass/fail across the

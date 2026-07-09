@@ -44,12 +44,16 @@ from run_scenarios import (
 )
 from spec_gen import (
     PROMPT_TEMPLATE,
+    LLMBudgetExceeded,
+    claude_cmd,
     detect_dnd_library,
     dnd_recipe_section,
     is_mutating,
     load_seed,
+    parse_claude_json,
     postprocess_spec,
     slugify,
+    strip_fences,
 )
 
 
@@ -895,3 +899,94 @@ def test_gated_console_ignore_regex():
 def test_gated_console_multiple_types():
     bad = gated_console(CONSOLE, ["error", "warning"], [])
     assert len(bad) == 3
+
+
+# ---------------------------------------------------------------- LLM spend controls
+
+@pytest.fixture
+def ledger():
+    """Reset the module-level spend ledger around each test."""
+    import spec_gen
+    spec_gen._spent_usd, spec_gen._call_count = 0.0, 0
+    yield spec_gen
+    spec_gen._spent_usd, spec_gen._call_count = 0.0, 0
+
+
+def _flag(cmd, name):
+    return cmd[cmd.index(name) + 1]
+
+
+def test_claude_cmd_defaults_are_cheap_and_toolless(monkeypatch):
+    for var in ("WEBQA_CLAUDE_MODEL", "WEBQA_CLAUDE_EFFORT", "WEBQA_CLAUDE_TOOLS"):
+        monkeypatch.delenv(var, raising=False)
+    cmd = claude_cmd("hello")
+    assert cmd[:3] == ["claude", "-p", "hello"]
+    assert _flag(cmd, "--model") == "sonnet"
+    assert _flag(cmd, "--effort") == "medium"
+    assert _flag(cmd, "--tools") == ""          # no agentic loop: context is in the prompt
+    assert _flag(cmd, "--output-format") == "json"   # spend is metered, not guessed
+    assert "--strict-mcp-config" in cmd
+
+
+def test_claude_cmd_env_overrides(monkeypatch):
+    monkeypatch.setenv("WEBQA_CLAUDE_MODEL", "opus")
+    monkeypatch.setenv("WEBQA_CLAUDE_EFFORT", "high")
+    monkeypatch.setenv("WEBQA_CLAUDE_TOOLS", "Read,Grep")
+    cmd = claude_cmd("x")
+    assert _flag(cmd, "--model") == "opus"
+    assert _flag(cmd, "--effort") == "high"
+    assert _flag(cmd, "--tools") == "Read,Grep"
+
+
+def test_claude_cmd_empty_model_drops_the_flag(monkeypatch):
+    monkeypatch.setenv("WEBQA_CLAUDE_MODEL", "")
+    assert "--model" not in claude_cmd("x")
+
+
+def test_strip_fences():
+    assert strip_fences("```typescript\nconst a = 1;\n```") == "const a = 1;"
+    assert strip_fences("  plain  ") == "plain"
+
+
+def test_parse_claude_json_returns_result_and_meters_spend(ledger):
+    out = parse_claude_json(json.dumps(
+        {"result": "```ts\nconst a = 1;\n```", "total_cost_usd": 0.25, "num_turns": 1}))
+    assert out == "const a = 1;"
+    assert ledger.llm_spend()["spent_usd"] == 0.25
+    assert ledger.llm_spend()["calls"] == 1
+
+
+def test_parse_claude_json_raises_on_session_error(ledger):
+    with pytest.raises(RuntimeError, match="claude session errored"):
+        parse_claude_json(json.dumps({"is_error": True, "result": "usage limit reached"}))
+    assert ledger.llm_spend()["calls"] == 0
+
+
+def test_parse_claude_json_falls_back_to_raw_stdout(ledger):
+    assert parse_claude_json("not json at all") == "not json at all"
+    assert ledger.llm_spend()["calls"] == 0
+
+
+def test_budget_blocks_before_spending(ledger, monkeypatch):
+    monkeypatch.setenv("WEBQA_MAX_USD", "1.00")
+    ledger._spent_usd = 1.00
+    with pytest.raises(LLMBudgetExceeded, match=r"budget exhausted"):
+        ledger._check_budget()
+
+
+def test_budget_allows_below_ceiling(ledger, monkeypatch):
+    monkeypatch.setenv("WEBQA_MAX_USD", "1.00")
+    ledger._spent_usd = 0.99
+    ledger._check_budget()  # must not raise
+
+
+def test_budget_guard_disabled_by_zero(ledger, monkeypatch):
+    monkeypatch.setenv("WEBQA_MAX_USD", "0")
+    ledger._spent_usd = 999.0
+    ledger._check_budget()  # must not raise
+
+
+def test_budget_falls_back_on_garbage_env(monkeypatch):
+    import spec_gen
+    monkeypatch.setenv("WEBQA_MAX_USD", "not-a-number")
+    assert spec_gen.llm_budget_usd() == spec_gen.DEFAULT_MAX_USD

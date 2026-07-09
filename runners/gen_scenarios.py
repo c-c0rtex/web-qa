@@ -22,7 +22,7 @@ from pathlib import Path
 
 from explore import load_project
 from run_scenarios import classify, declared_type, split_tcs
-from spec_gen import call_claude, load_app_context, slugify
+from spec_gen import call_claude, llm_spend, load_app_context, slugify
 
 MAX_DIFF_CHARS = 9000
 
@@ -176,6 +176,7 @@ def main() -> int:
     summary = {"out": str(out_path), "tc_count": len(tc_ids), "tc_ids": tc_ids}
     if conflicts:
         summary["type_conflicts"] = conflicts
+    summary["llm"] = llm_spend()
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 

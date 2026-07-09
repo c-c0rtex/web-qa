@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -34,6 +35,18 @@ from run_scenarios import declared_type, split_tcs, tc_roles
 
 MAX_CONTEXT_CHARS = 24000
 GEN_ATTEMPTS = 2  # initial + one retry with playwright parse error fed back
+
+# --- LLM spend controls ----------------------------------------------------
+# `claude -p` is a full headless Claude Code session, not one API call: it ships a
+# system prompt, every tool schema, and — unless muzzled — an agentic loop that will
+# happily crawl the repo for minutes. Fanning ~30 TCs out across that, on whatever
+# frontier model the user's interactive CLI happens to be pinned to, drains a
+# subscription window in minutes. These defaults keep generation cheap and bounded.
+# Every one is overridable by env var; none of them silently costs more than stated.
+DEFAULT_CLAUDE_MODEL = "sonnet"    # spec-gen is a mechanical translation, not frontier reasoning
+DEFAULT_CLAUDE_EFFORT = "medium"   # frontier defaults are `high`, which we do not need here
+DEFAULT_CLAUDE_TOOLS = ""          # "" = no tools: app.context.md is already in the prompt
+DEFAULT_MAX_USD = 5.0              # hard per-process ceiling; 0 disables the guard
 
 DEFAULT_AUTH_HINT = (
     "POST {backend_url}/auth/login with JSON {email, password}; inspect the response — "
@@ -230,29 +243,118 @@ def is_mutating(tc: dict) -> bool:
     return declared_type(tc.get("body", "")) != "passive"
 
 
-def call_claude(prompt: str, timeout: int | None = None) -> str:
-    """Call `claude -p <prompt>` and return stdout.
-    WEBQA_CLAUDE_MODEL (e.g. "sonnet", "opus") overrides the CLI default model.
-    WEBQA_GEN_TIMEOUT (seconds, default 300) bounds one generation — complex multi-step
-    TCs did not fit the old 180s and died silently."""
-    timeout = timeout or int(os.environ.get("WEBQA_GEN_TIMEOUT", "300"))
-    cmd = ["claude", "-p", prompt]
-    model = os.environ.get("WEBQA_CLAUDE_MODEL")
+class LLMBudgetExceeded(RuntimeError):
+    """Raised INSTEAD of spending past the ceiling. Nothing reaches the model."""
+
+
+_ledger_lock = threading.Lock()
+_spent_usd = 0.0
+_call_count = 0
+
+
+def llm_budget_usd() -> float:
+    """Hard ceiling in USD for this process. <= 0 disables the guard."""
+    try:
+        return float(os.environ.get("WEBQA_MAX_USD", DEFAULT_MAX_USD))
+    except ValueError:
+        return DEFAULT_MAX_USD
+
+
+def llm_spend() -> dict:
+    """Ledger snapshot — attached to every runner's summary JSON so a run's cost is
+    reported, not guessed."""
+    with _ledger_lock:
+        return {"spent_usd": round(_spent_usd, 4), "calls": _call_count,
+                "budget_usd": llm_budget_usd()}
+
+
+def _check_budget() -> None:
+    budget = llm_budget_usd()
+    if budget <= 0:
+        return
+    with _ledger_lock:
+        if _spent_usd >= budget:
+            raise LLMBudgetExceeded(
+                f"LLM budget exhausted: ${_spent_usd:.2f} spent over {_call_count} call(s), "
+                f"ceiling ${budget:.2f}. Nothing was sent to the model. Raise WEBQA_MAX_USD "
+                f"(or --max-usd) to continue, or 0 to disable the guard."
+            )
+
+
+def _record_spend(usd: float) -> float:
+    global _spent_usd, _call_count
+    with _ledger_lock:
+        _spent_usd += usd
+        _call_count += 1
+        return _spent_usd
+
+
+def strip_fences(out: str) -> str:
+    """Drop code fences the model added despite instructions."""
+    out = re.sub(r"^```(?:typescript|ts)?\s*\n?", "", out.strip())
+    return re.sub(r"\n?```\s*$", "", out)
+
+
+def claude_cmd(prompt: str) -> list[str]:
+    """Argv for one metered, tool-less `claude -p` session. Separated from call_claude
+    so the cost controls are testable without spawning the CLI."""
+    cmd = ["claude", "-p", prompt, "--output-format", "json", "--strict-mcp-config"]
+    model = os.environ.get("WEBQA_CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
     if model:
         cmd += ["--model", model]
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    effort = os.environ.get("WEBQA_CLAUDE_EFFORT", DEFAULT_CLAUDE_EFFORT)
+    if effort:
+        cmd += ["--effort", effort]
+    cmd += ["--tools", os.environ.get("WEBQA_CLAUDE_TOOLS", DEFAULT_CLAUDE_TOOLS)]
+    return cmd
+
+
+def parse_claude_json(stdout: str) -> str:
+    """Pull the text result out of `--output-format json` and meter the spend.
+    Falls back to raw stdout if the CLI ever stops emitting JSON."""
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return strip_fences(stdout)
+    if not isinstance(payload, dict):
+        return strip_fences(stdout)
+    if payload.get("is_error"):
+        raise RuntimeError(f"claude session errored: {str(payload.get('result'))[:500]}")
+    cost = payload.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        total = _record_spend(float(cost))
+        print(f"[llm] ${float(cost):.4f} this call, ${total:.2f} of "
+              f"${llm_budget_usd():.2f} budget ({payload.get('num_turns', '?')} turn(s))",
+              file=sys.stderr, flush=True)
+    return strip_fences(str(payload.get("result") or ""))
+
+
+def call_claude(prompt: str, timeout: int | None = None) -> str:
+    """Run one headless `claude -p` session and return its text result.
+
+    This is the ONLY place web-qa spends tokens — spec_gen, gen_scenarios and maintain
+    all funnel through it — so the cost controls live here rather than at each caller:
+
+      * tools are OFF by default: the prompt already carries app.context.md, so an
+        agentic loop re-reading the repo buys nothing and costs a great deal;
+      * the model defaults to `sonnet` rather than inheriting whatever the user's
+        interactive CLI is pinned to (a frontier default is several times the price
+        for what is a mechanical translation);
+      * spend is metered via `--output-format json` and capped by WEBQA_MAX_USD.
+
+    Env overrides: WEBQA_CLAUDE_MODEL, WEBQA_CLAUDE_EFFORT, WEBQA_CLAUDE_TOOLS,
+    WEBQA_MAX_USD, WEBQA_GEN_TIMEOUT (seconds, default 300 — complex multi-step TCs
+    did not fit the old 180s and died silently).
+    """
+    _check_budget()
+    timeout = timeout or int(os.environ.get("WEBQA_GEN_TIMEOUT", "300"))
+    proc = subprocess.run(claude_cmd(prompt), capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {proc.stderr[:500]}")
-    out = proc.stdout.strip()
-    # Strip code fences if model added them despite instructions
-    out = re.sub(r"^```(?:typescript|ts)?\s*\n?", "", out)
-    out = re.sub(r"\n?```\s*$", "", out)
-    return out
+        # The CLI reports usage-limit exhaustion on stdout, not stderr. Reading only
+        # stderr turned "5-hour limit reached" into a blank, unactionable error.
+        detail = (proc.stderr.strip() or proc.stdout.strip() or "(no output)")[:500]
+        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {detail}")
+    return parse_claude_json(proc.stdout)
 
 
 def postprocess_spec(code: str) -> str:
@@ -352,7 +454,7 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
 
 
 def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
-              force: bool = False, workers: int = 3, live_probe: bool = True) -> dict:
+              force: bool = False, workers: int = 1, live_probe: bool = True) -> dict:
     proj = load_project(alias)
     proj_dir = Path(proj["path"])
     webqa = proj_dir / ".web-qa"
@@ -431,7 +533,9 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
             jobs.append((tc_key, prompt, out_path, body_hash, declared[0] if declared else None))
 
     if jobs:
-        print(f"[gen] {len(jobs)} spec(s) to generate, {workers} workers", flush=True)
+        budget = llm_budget_usd()
+        cap = f"${budget:.2f} budget" if budget > 0 else "budget guard OFF"
+        print(f"[gen] {len(jobs)} spec(s) to generate, {workers} worker(s), {cap}", flush=True)
         hash_by_key = {k: h for k, _, _, h, _ in jobs}
         path_by_key = {k: o for k, _, o, _, _ in jobs}
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -463,6 +567,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                     print(f"[gen] FAIL {tc_key}: {err[:200]}", file=sys.stderr, flush=True)
 
     cache_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False))
+    summary["llm"] = llm_spend()
     return summary
 
 
@@ -472,10 +577,17 @@ def main() -> int:
     ap.add_argument("--all", action="store_true", help="generate all TCs, not only mutating")
     ap.add_argument("--tc", help="only generate this TC id (e.g. TC-I4)")
     ap.add_argument("--force", action="store_true", help="ignore cache")
-    ap.add_argument("--workers", type=int, default=3, help="parallel claude calls (default 3)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel claude calls (default 1). Concurrent calls all miss the "
+                         "shared prompt cache — each extra worker buys wall-clock with money")
+    ap.add_argument("--max-usd", type=float, default=None,
+                    help=f"hard LLM spend ceiling for this run (default {DEFAULT_MAX_USD:.2f}, "
+                         f"0 = no guard). Also settable via WEBQA_MAX_USD")
     ap.add_argument("--no-probe", action="store_true",
                     help="skip the live locator check against the running app")
     args = ap.parse_args()
+    if args.max_usd is not None:
+        os.environ["WEBQA_MAX_USD"] = str(args.max_usd)
 
     res = gen_specs(args.alias, all_tcs=args.all, only_tc=args.tc, force=args.force,
                     workers=args.workers, live_probe=not args.no_probe)
