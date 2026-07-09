@@ -6,7 +6,7 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
-## Shipped — v0.5.0 (the runners stop guessing what they were never told)
+## Shipped — v0.4.5 (the runners stop guessing what they were never told)
 
 A full run over a real app produced 52 failing specs. Four were candidate product bugs. The
 rest were the tool asking the model to invent facts it already had, or had thrown away. Each
