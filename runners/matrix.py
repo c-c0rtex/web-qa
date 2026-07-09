@@ -61,10 +61,45 @@ def collect_scenario_tcs(webqa: Path, backend_prefixes: tuple[str, ...]) -> list
     return rows
 
 
+RE_SPEC_TC = re.compile(r"__(tc-[a-z]*\d+)", re.IGNORECASE)
+# Write verbs against the backend. The login POST is the one write every spec performs and
+# it mutates nothing, so it must not make the whole suite look mutating.
+RE_SPEC_WRITE = re.compile(r"\.(?:post|put|patch|delete)\s*\(\s*[`'\"][^`'\"]*", re.IGNORECASE)
+
+
+def spec_tc_id(filename: str) -> str:
+    """`catalogs__tc-ref5-crud.spec.ts` → `TC-REF5`; '' for ad-hoc/hand-written specs."""
+    m = RE_SPEC_TC.search(filename)
+    return m.group(1).upper() if m else ""
+
+
+def spec_is_mutating(text: str, tc_kind: str | None) -> bool:
+    """Does running this spec write to the app's data?
+
+    The TC's declared kind is authoritative when we can find it. Specs with no matching TC
+    (hand-written, ad-hoc) are read from source: any non-auth write verb counts.
+
+    This exists because the mutation gate used to live only in the passive runner. `matrix`
+    handed every .spec.ts to playwright regardless, so a run that reported 78 mutating test
+    cases as "✋ manual" had already created, edited and deleted rows through the specs."""
+    if tc_kind == "mutating":
+        return True
+    if tc_kind == "passive":
+        return False
+    for m in RE_SPEC_WRITE.finditer(text):
+        if "/auth/" not in m.group(0) and "/login" not in m.group(0):
+            return True
+    return False
+
+
 def collect_specs(webqa: Path, include_adhoc: bool,
-                  exclude_globs: list[str] | None = None) -> tuple[list[dict], list[str]]:
+                  exclude_globs: list[str] | None = None,
+                  tc_kinds: dict[str, str] | None = None) -> tuple[list[dict], list[str]]:
     """Returns (rows, excluded_names). exclude_globs come from config `gate_exclude` —
-    specs for features hidden on prod (feature flags, build-args) don't belong in the gate."""
+    specs for features hidden on prod (feature flags, build-args) don't belong in the gate.
+
+    `tc_kinds` maps TC id → passive|mutating so each spec row can declare whether it writes.
+    Without that the Kind column said `spec` for all of them and mutations were invisible."""
     import fnmatch
     rows, excluded = [], []
     specs_dir = webqa / "specs"
@@ -75,11 +110,47 @@ def collect_specs(webqa: Path, include_adhoc: bool,
         if any(fnmatch.fnmatch(f.name, g) for g in exclude_globs or []):
             excluded.append(f.name)
             continue
+        tc_id = spec_tc_id(f.name)
+        mutating = spec_is_mutating(f.read_text(encoding="utf-8", errors="ignore"),
+                                    (tc_kinds or {}).get(tc_id))
         rows.append({
-            "source": "spec", "file": f.name, "id": "", "title": f.stem,
-            "kind": "adhoc" if adhoc else "spec", "status": "not-run",
+            "source": "spec", "file": f.name, "id": tc_id, "title": f.stem,
+            "kind": ("adhoc" if adhoc else "spec") + (" (mutating)" if mutating else ""),
+            "mutating": mutating, "status": "not-run",
         })
     return rows, excluded
+
+
+DEFAULT_KEEP_ARTIFACTS = 3
+
+
+def artifact_stats(artifacts_dir: Path) -> dict:
+    """Files and bytes playwright left behind for this run. Empty dict when nothing failed."""
+    if not artifacts_dir.is_dir():
+        return {}
+    files = [f for f in artifacts_dir.rglob("*") if f.is_file()]
+    if not files:
+        return {}
+    return {"dir": str(artifacts_dir), "files": len(files),
+            "bytes": sum(f.stat().st_size for f in files)}
+
+
+def prune_artifacts(webqa: Path, keep: int) -> list[str]:
+    """Delete `test-results/` from all but the `keep` newest runs; the reports themselves stay.
+
+    Traces are megabytes apiece. Keeping every run's forever turns .web-qa into gigabytes, but
+    keeping none is what let run N+1 erase the evidence of run N. Run ids sort lexically."""
+    import shutil
+    reports = webqa / "reports"
+    if keep < 0 or not reports.is_dir():
+        return []
+    have = sorted((d for d in reports.iterdir() if (d / "test-results").is_dir()),
+                  key=lambda d: d.name)
+    pruned = []
+    for d in have[:max(0, len(have) - keep)]:
+        shutil.rmtree(d / "test-results", ignore_errors=True)
+        pruned.append(d.name)
+    return pruned
 
 
 def rows_for_role(rows: list[dict], role: str | None) -> list[dict]:
@@ -127,17 +198,25 @@ def run_passive_stage(alias: str, scenario_rows: list[dict], role: str | None = 
 
 
 def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: int | None = None,
-                    viewport: str | None = None, mobile_device: str | None = None) -> None:
+                    viewport: str | None = None, mobile_device: str | None = None,
+                    artifacts_dir: Path | None = None) -> None:
     """Run playwright on exactly the inventoried spec files, fold statuses into spec_rows."""
     if not (webqa / "playwright.config.ts").is_file():
         for r in spec_rows:
             r["status"] = "error"
             r["note"] = "no playwright.config.ts (see SKILL.md setup)"
         return
+    to_run = [r for r in spec_rows if not r.get("skipped_mutating")]
+    if not to_run:
+        return
     out_json = run_dir / "playwright-results.json"
     log_path = run_dir / "playwright.log"
-    files = [f"specs/{r['file']}" for r in spec_rows]
+    files = [f"specs/{r['file']}" for r in to_run]
     env = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=str(out_json))
+    if artifacts_dir:
+        # playwright clears its outputDir on start; pointing it at THIS run's folder is what
+        # keeps the previous run's screenshots and page snapshots alive
+        env["WEBQA_OUTPUT_DIR"] = str(artifacts_dir)
     if viewport:
         env["WEBQA_VIEWPORT"] = viewport  # picked up by playwright.config.template.ts
     if mobile_device:
@@ -166,7 +245,7 @@ def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: 
             exit_note = "stage timeout (3600s), playwright process group killed"
     if not out_json.is_file():
         tail = log_path.read_text()[-1500:] if log_path.is_file() else ""
-        for r in spec_rows:
+        for r in to_run:
             r["status"] = "error"
             r["note"] = f"playwright produced no report ({exit_note})"
         print(f"[matrix] playwright failed ({exit_note}):\n{tail}", file=sys.stderr)
@@ -187,7 +266,7 @@ def run_specs_stage(webqa: Path, spec_rows: list[dict], run_dir: Path, workers: 
     for s in data.get("suites", []):
         walk(s)
 
-    for row in spec_rows:
+    for row in to_run:
         statuses = file_statuses.get(row["file"])
         if not statuses:
             row["status"] = "error"
@@ -403,6 +482,14 @@ def main() -> int:
     ap.add_argument("--junit", help="also write the matrix as JUnit XML to this path (CI systems)")
     ap.add_argument("--no-fixtures", action="store_true",
                     help="skip the project's fixture_cmd for this run")
+    ap.add_argument("--no-mutations", action="store_true",
+                    help="do not write to the app's data: mutating specs are reported "
+                         "`manual` instead of run. The passive stage never mutates anyway, "
+                         "so without this flag a 'passive' matrix run still mutates via specs")
+    ap.add_argument("--keep-artifacts", type=int, default=None,
+                    help=f"how many runs' test-results/ folders to keep on disk "
+                         f"(default {DEFAULT_KEEP_ARTIFACTS}, config `keep_artifacts`; "
+                         f"-1 = keep everything). Traces are megabytes per failure")
 
     args = ap.parse_args()
 
@@ -427,10 +514,19 @@ def main() -> int:
         (d for v in viewports if v for d in [viewport_entry(proj, v).get("device")] if d),
         None,
     )
+    tc_kinds = {r["id"]: r["kind"] for r in collect_scenario_tcs(webqa, backend_prefixes)}
     spec_rows, gate_excluded = collect_specs(webqa, args.include_adhoc,
-                                             proj.get("gate_exclude") or [])
+                                             proj.get("gate_exclude") or [], tc_kinds)
     for r in spec_rows:
         r["role"] = "-"
+        if args.no_mutations and r.get("mutating"):
+            r["skipped_mutating"] = True
+            r["status"] = "manual"
+            r["note"] = "skipped (mutating spec); --no-mutations"
+    mutating_specs = sum(1 for r in spec_rows if r.get("mutating"))
+    if mutating_specs and not args.no_mutations and not args.skip_specs:
+        print(f"[matrix] {mutating_specs} of {len(spec_rows)} spec(s) WRITE to the app's data "
+              f"(pass --no-mutations for a read-only run)", file=sys.stderr)
     # role-annotated TCs whose declared roles are outside --roles must not vanish silently —
     # surface them as skip rows so the inventory stays complete
     requested = {(r or "").lower() for r in roles if r}
@@ -469,7 +565,18 @@ def main() -> int:
     matrix_dir = run_dir / "matrix"
     matrix_dir.mkdir(parents=True, exist_ok=True)
     matrix_md = matrix_dir / "matrix.md"
+    artifacts_dir = run_dir / "test-results"
     passive_reports: list[str] = []
+    # What produced this report. Absent it, nobody — including the next reader of the
+    # matrix — can tell whether the run skipped the passive stage, ran two workers, or
+    # mutated the database. The stats alone cannot answer any of that.
+    invocation = {
+        "argv": sys.argv,
+        "cwd": os.getcwd(),
+        "flags": {k: v for k, v in sorted(vars(args).items()) if v not in (None, False)},
+        "env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("WEBQA_")},
+    }
+    artifacts: dict = {}
 
     def snapshot(stage: str, flaky_keys: set[str] = frozenset(),
                  quarantined: set[str] = frozenset()) -> tuple[dict, bool]:
@@ -485,6 +592,8 @@ def main() -> int:
                                               coverage, flaky_keys, role_coverage, quarantined))
         (matrix_dir / "matrix.json").write_text(json.dumps({
             "run_id": run_id, "alias": proj["alias"], "stage": stage, "gate_ok": gate_ok,
+            "invocation": invocation, "artifacts": artifacts,
+            "mutating_specs_run": 0 if args.no_mutations or args.skip_specs else mutating_specs,
             "stats": stats, "coverage": coverage, "role_coverage": role_coverage,
             "flaky": sorted(flaky_keys), "quarantined": sorted(quarantined),
             "gate_excluded": gate_excluded,
@@ -504,12 +613,24 @@ def main() -> int:
                 passive_reports.append(rep)
             snapshot(f"passive{label}")
     if spec_rows and not args.skip_specs:
-        print(f"[matrix] specs stage: {len(spec_rows)} spec files", file=sys.stderr)
+        runnable = sum(1 for r in spec_rows if not r.get("skipped_mutating"))
+        print(f"[matrix] specs stage: {runnable} of {len(spec_rows)} spec files", file=sys.stderr)
         # CLI --workers > config `workers` (small dev stands want 1: parallel chromiums
         # against one dev server turn timing into noise) > template default
         run_specs_stage(webqa, spec_rows, matrix_dir, args.workers or proj.get("workers"),
-                        viewport_env(proj), mobile_device)
+                        viewport_env(proj), mobile_device, artifacts_dir)
+        artifacts.update(artifact_stats(artifacts_dir))
+        if artifacts:
+            print(f"[matrix] failure artifacts → {artifacts_dir} "
+                  f"({artifacts['files']} files, {artifacts['bytes'] // 1024} KB)", file=sys.stderr)
         snapshot("specs")
+
+    keep = args.keep_artifacts if args.keep_artifacts is not None else \
+        int(proj.get("keep_artifacts", DEFAULT_KEEP_ARTIFACTS))
+    pruned = prune_artifacts(webqa, keep)
+    if pruned:
+        print(f"[matrix] pruned test-results of {len(pruned)} older run(s), kept {keep}",
+              file=sys.stderr)
 
     q_window = int(proj.get("quarantine_after") or 0)
     flaky_keys, quarantined = update_history(webqa, run_id, rows, q_window)

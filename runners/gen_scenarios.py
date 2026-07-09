@@ -95,12 +95,21 @@ RULES:
 - CORRECTNESS, not presence. Any TC whose page displays data the app DERIVED (a KPI, a total,
   a count, a ranking, a currency sum) MUST have at least one Expected bullet asserting that
   the displayed value is RIGHT, and naming where that truth comes from. "KPI tiles show
-  numbers" is worthless — a broken aggregate happily shows `0`. Write instead: "the «Overdue»
-  tile equals the number of invoices whose status is overdue, per GET `/invoices`"
-- The truth must come from the PRIMARY collections, never from the same aggregate/summary
-  endpoint the page itself calls — if that endpoint's aggregation is broken, the check passes
-  on a broken feature. If no independent source exists, say so in the bullet and assert an
-  invariant instead (ordering, sum of parts equals the displayed total)
+  numbers" is worthless — a broken aggregate happily shows `0`
+- Prefer a truth the app itself can be made to state twice. In order:
+  1. DRILL-DOWN: "clicking the «Overdue» tile opens the invoice list filtered to overdue, and
+     its row count equals the number the tile showed" — nothing is recomputed, so nothing is
+     invented
+  2. DELTA: "after archiving one overdue invoice through the UI, the tile drops by exactly 1"
+  3. RE-COMPUTATION, and only when the metric's definition is written down somewhere you can
+     cite: "the «Overdue» tile equals the number of INVOICES (not orders) whose
+     `status_payment` is the wire value `overdue`, per GET `/invoices`". State the UNIT and use
+     WIRE values, never the label the UI renders for them. Getting the unit wrong makes the
+     test red while the app is right
+- Never take the truth from the same aggregate/summary endpoint the page itself calls — if
+  that endpoint's aggregation is broken, the check passes on a broken feature. If no
+  independent source exists, say so in the bullet and assert an invariant instead (ordering,
+  sum of parts equals the displayed total)
 - If behaviour differs per role, write SEPARATE TCs annotated `**Role:** <name>` — never mix
   two roles' expectations in one TC. Unannotated TCs run under the default account
 - Write steps/expected in {language}; keep ids/paths/technical terms as-is

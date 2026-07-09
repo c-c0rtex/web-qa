@@ -197,6 +197,27 @@ def run_fixture_cmd(proj: dict, *, teardown: bool = False) -> None:
         raise SystemExit(f"{key} failed (exit {proc.returncode}): {cmd}")
 
 
+def whoami(backend_url: str, cookies: dict, token: str | None,
+           proj: dict | None = None) -> dict:
+    """The authenticated user, read from the identity endpoint (`auth_me_path`, default
+    `/auth/me`). Returns {} when the app has no such endpoint.
+
+    Worth its own request: a JWT app's login response is `{access_token, token_type}` and
+    carries no identity at all. Reporting that dict as the user made every report say
+    "Logged-in: None (None)" and made doctor's per-role check vacuous — it proved the login
+    returned 2xx, never that the account actually holds the role the matrix ran it under."""
+    path = (proj or {}).get("auth_me_path") or "/auth/me"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        r = httpx.get(f"{backend_url}{path}", cookies=cookies, headers=headers, timeout=10)
+        if r.status_code >= 400:
+            return {}
+        me = r.json()
+        return me if isinstance(me, dict) else {}
+    except Exception:
+        return {}
+
+
 def api_login(backend_url: str, email: str, password: str,
               proj: dict | None = None) -> tuple[dict, dict, str | None]:
     """Return (cookies_dict, user_me_dict, token_or_None).
@@ -206,6 +227,7 @@ def api_login(backend_url: str, email: str, password: str,
       auth_login_path   login endpoint (default /auth/login)
       auth_login_body   JSON body template with {email}/{password} (default flat)
       auth_token_field  dot-path to a bearer token in the response (e.g. "user.token")
+      auth_me_path      identity endpoint (default /auth/me)
     Cookie-session apps need none of these — the defaults reproduce the old behavior."""
     proj = proj or {}
     path = proj.get("auth_login_path") or "/auth/login"
@@ -216,7 +238,13 @@ def api_login(backend_url: str, email: str, password: str,
     data = r.json()
     token_field = proj.get("auth_token_field")
     token = str(_dig(data, token_field)) if token_field and _dig(data, token_field) else None
-    return dict(r.cookies), data, token
+    cookies = dict(r.cookies)
+    me = whoami(backend_url, cookies, token, proj)
+    # A cookie-session app that answers login WITH the user keeps working unchanged.
+    if not me and isinstance(data, dict) and ("email" in data or "role" in data):
+        me = data
+    me.setdefault("email", email)
+    return cookies, me, token
 
 
 def fetch_openapi(backend_url: str) -> dict:
@@ -593,6 +621,89 @@ def dedupe_by_template(pages: list[dict]) -> list[dict]:
     return out
 
 
+HTTP_METHODS = ("get", "post", "put", "patch", "delete")
+
+
+def deref(openapi: dict, schema: dict) -> dict:
+    """Resolve `$ref: '#/components/schemas/X'` one hop. Non-refs pass through."""
+    if not isinstance(schema, dict):
+        return {}
+    ref = schema.get("$ref")
+    if not ref:
+        return schema
+    name = ref.split("/")[-1]
+    return ((openapi.get("components") or {}).get("schemas") or {}).get(name) or {}
+
+
+def schema_fields(openapi: dict, schema: dict, limit: int = 20) -> str:
+    """Flatten a schema into `field*:type` (star = required). Resolves one $ref."""
+    schema = deref(openapi, schema)
+    props = schema.get("properties") or {}
+    required = set(schema.get("required") or [])
+    out = []
+    for k, v in list(props.items())[:limit]:
+        t = (v or {}).get("type") or ("$ref" if "$ref" in (v or {}) else "any")
+        out.append(f"{k}{'*' if k in required else ''}:{t}")
+    return ", ".join(out)
+
+
+def schema_brief(openapi: dict, schema: dict) -> str:
+    """One-line shape of a RESPONSE: `array of {id:int, …}`, `{items:array, total:int}`, `int`.
+
+    The single most expensive thing the map used to omit. Without it the generator guesses
+    the envelope, writes `(await r.json()).filter(...)`, and the spec dies with
+    `TypeError: x.filter is not a function` on any paginated endpoint."""
+    schema = deref(openapi, schema)
+    if not schema:
+        return ""
+    t = schema.get("type")
+    if t == "array":
+        inner = schema_fields(openapi, schema.get("items") or {}, limit=12)
+        return f"array of {{{inner}}}" if inner else "array"
+    fields = schema_fields(openapi, schema, limit=12)
+    if fields:
+        return f"{{{fields}}}"
+    return t or "object"
+
+
+def op_responses(openapi: dict, op: dict) -> str:
+    """`200: array of {…}` plus the other declared status codes.
+
+    The success code is not always 200 — a POST that returns 201 turned into
+    `expect(r.status()).toBe(200)` and a red test against a correct API."""
+    responses = op.get("responses") or {}
+    codes = sorted(str(c) for c in responses if str(c).isdigit())
+    if not codes:
+        return ""
+    success = next((c for c in codes if c.startswith("2")), None)
+    if not success:
+        return "status: " + ", ".join(codes)
+    body = ((responses[success] or {}).get("content") or {}).get("application/json") or {}
+    brief = schema_brief(openapi, body.get("schema") or {})
+    others = [c for c in codes if c != success]
+    tail = f" (also declares {', '.join(others)})" if others else ""
+    return f"{success}: {brief or 'no body'}{tail}"
+
+
+def collect_enums(openapi: dict, limit: int = 30) -> dict[str, list[str]]:
+    """Named enums from components.schemas — both standalone enum schemas and enum-typed
+    properties. Keyed `Schema.property` so a spec can cite where the value comes from."""
+    out: dict[str, list[str]] = {}
+    schemas = (openapi.get("components") or {}).get("schemas") or {}
+    for name, schema in schemas.items():
+        if not isinstance(schema, dict):
+            continue
+        if schema.get("enum"):
+            out[name] = [str(v) for v in schema["enum"]]
+        for prop, spec in (schema.get("properties") or {}).items():
+            values = (spec or {}).get("enum")
+            if values:
+                out[f"{name}.{prop}"] = [str(v) for v in values]
+        if len(out) >= limit:
+            break
+    return dict(list(out.items())[:limit])
+
+
 def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: dict) -> str:
     pages = dedupe_by_template(pages)
     lines: list[str] = []
@@ -658,21 +769,21 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
 
     # ===== ARIA snapshots =====
     lines.append("## ARIA snapshots (role/name — ground truth for getByRole)\n")
-    # Budget shared EVENLY, not first-come. Spending it in crawl order gave the first ten
-    # routes a full snapshot and the rest — including the most-tested sections — nothing at
-    # all, so their specs guessed every selector and hung on the first miss. A short snapshot
-    # everywhere beats a long one for a tenth of the app.
-    ARIA_BUDGET = 16000
-    ARIA_MIN = 400
+    # No map-wide budget. There used to be one (16 KB shared across every route) because the
+    # whole map was pasted into every spec-gen prompt. It isn't anymore: spec_gen.slice_aria()
+    # keeps only the routes of the test case being generated, so the prompt budget belongs
+    # THERE, not here. Sharing 16 KB across 47 routes left each one 400 characters — a page
+    # title and two nodes — and the generator went right on guessing button captions.
+    # The map is a file on disk; let it hold what was actually captured.
+    ARIA_PAGE_MAX = 20000     # one pathological page must not become the whole file
     with_aria = [p for p in pages if p.get("aria")]
     if not with_aria:
         lines.append("_(no aria snapshots captured)_")
     else:
-        per_page = max(ARIA_MIN, ARIA_BUDGET // len(with_aria))
         for p in with_aria:
             a = p["aria"]
-            clipped = a[:per_page]
-            note = "\n# …(snapshot clipped)" if len(a) > per_page else ""
+            clipped = a[:ARIA_PAGE_MAX]
+            note = "\n# …(snapshot clipped)" if len(a) > ARIA_PAGE_MAX else ""
             route = p.get("template") or p.get("path", "")
             sampled = f"\n_(sampled from `{p['sampled_from']}`)_" if p.get("sampled_from") else ""
             lines.append(f"### `{route}`{sampled}\n```yaml\n{clipped}{note}\n```")
@@ -682,38 +793,39 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
     lines.append("## Backend endpoints (from OpenAPI)\n")
     paths = openapi.get("paths", {}) if openapi else {}
     if paths:
-        def schema_fields(schema: dict) -> str:
-            """Flatten a request schema into `field*:type` (star = required). Resolves one $ref."""
-            if "$ref" in schema:
-                name = schema["$ref"].split("/")[-1]
-                schema = (openapi.get("components", {}).get("schemas", {}) or {}).get(name, {})
-            props = schema.get("properties") or {}
-            required = set(schema.get("required") or [])
-            out = []
-            for k, v in list(props.items())[:20]:
-                t = v.get("type") or ("$ref" if "$ref" in v else "any")
-                out.append(f"{k}{'*' if k in required else ''}:{t}")
-            return ", ".join(out)
-
         # Group by first segment; for mutating methods include REAL request field names so
         # spec-gen stops guessing the API contract (mode vs transport_mode etc.)
         groups: dict[str, list[str]] = {}
         for p, methods in paths.items():
             parts = p.strip("/").split("/")
             head = parts[0] if parts else "root"
-            entry = [p + " — " + ", ".join(m.upper() for m in methods.keys() if m in ("get", "post", "put", "patch", "delete"))]
-            for m in ("post", "put", "patch"):
-                body_schema = (((methods.get(m) or {}).get("requestBody") or {})
+            entry = [p + " — " + ", ".join(m.upper() for m in methods.keys() if m in HTTP_METHODS)]
+            for m in HTTP_METHODS:
+                op = methods.get(m)
+                if not isinstance(op, dict):
+                    continue
+                body_schema = ((op.get("requestBody") or {})
                                .get("content", {}).get("application/json", {}).get("schema"))
                 if body_schema:
-                    fields = schema_fields(body_schema)
+                    fields = schema_fields(openapi, body_schema)
                     if fields:
                         entry.append(f"  - {m.upper()} body: {fields}")
+                resp = op_responses(openapi, op)
+                if resp:
+                    entry.append(f"  - {m.upper()} → {resp}")
             groups.setdefault(head, []).append("\n".join(entry))
         for head, items in sorted(groups.items()):
             lines.append(f"### `/{head}`")
             for it in items:
                 lines.append(f"- {it}")
+            lines.append("")
+        enums = collect_enums(openapi)
+        if enums:
+            # The wire values. Specs used to compare an API enum against the label the UI
+            # renders for it — a comparison that is wrong even when both sides are right.
+            lines.append("### Enum values (WIRE values — never compare these to UI labels)\n")
+            for name, vals in enums.items():
+                lines.append(f"- `{name}`: " + ", ".join(f"`{v}`" for v in vals))
             lines.append("")
     else:
         lines.append("_(openapi not reachable)_\n")

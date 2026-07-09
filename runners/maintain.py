@@ -56,10 +56,26 @@ TASK — FIRST classify the failure, THEN act:
     `test(` with `test.fixme(` and add a first line `// APP-BUG: <one-line description>` —
     healers patch test fragility, not real bugs
 
+WHEN NOT TO CHOOSE (c) — a numeric or textual mismatch is NOT evidence of an app bug:
+- If the spec RE-IMPLEMENTS the value it checks (recomputes a KPI, a total, a count from raw
+  collections), the mismatch is a tie between two implementations and the spec's is the
+  unverified one. Unless the APP MAP or the spec's own comments state the metric's definition
+  AND that definition matches what the spec computes, this is case (a): the oracle is wrong.
+  Watch for the classics — counting rows of the wrong entity, summing the wrong currency,
+  comparing a wire enum against the label the UI renders for it, treating a `—` placeholder
+  as `''`
+- A control that is PRESENT but `[disabled]` is not a permission leak. Read the page state in
+  the failure context before calling `toHaveCount(0)` a genuine RBAC bug
+- Choose (c) only when the failure needs no re-derivation to be wrong: a 500, a crash, a
+  drill-down that contradicts the summary it drills into, an invariant the app itself breaks
+
 Rules for case (a):
 - Output ONLY raw TypeScript code — no markdown fences, no commentary
 - Keep the same test intent and assertions coverage; fix only what makes it fail
 - Selector texts/labels MUST come from the APP MAP or from the failure output (e.g. the "received" strings), never invented
+- The PAGE STATE AT FAILURE below (when present) is the real DOM: take roles and accessible
+  names from it. An element it shows with no accessible name cannot be reached by
+  `getByLabel` / `getByRole(name)` at all — locate it structurally
 - NEVER use `waitForLoadState('networkidle')` (SPAs with polling never go idle) — replace it with
   web-first assertions (`await expect(locator).toBeVisible()`), `page.waitForURL(...)`, or
   `waitForLoadState('domcontentloaded')`
@@ -72,8 +88,10 @@ Output the corrected .spec.ts now:
 
 
 def run_playwright_json(webqa: Path, out_json: Path, workers: int | None,
-                        viewport: str | None = None) -> None:
+                        viewport: str | None = None, artifacts_dir: Path | None = None) -> None:
     env = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=str(out_json))
+    if artifacts_dir:
+        env["WEBQA_OUTPUT_DIR"] = str(artifacts_dir)
     if viewport:
         env["WEBQA_VIEWPORT"] = viewport
     cmd = ["npx", "playwright", "test", "--reporter=json"]
@@ -117,24 +135,56 @@ def failing_specs_from_report(report: dict) -> dict[str, list[str]]:
     return fails
 
 
-def failure_artifacts(webqa: Path, spec_name: str) -> dict:
+ERROR_CONTEXT_CHARS = 14000
+
+
+def artifact_prefix(spec_name: str) -> str:
+    """`catalogs__tc-ref5-crud.spec.ts` → `catalogs__tc-ref5-crud`.
+
+    Playwright names its result dir `<file-without-.spec.ts>-<title>-<project>`. The old
+    code used `Path(name).stem`, which strips only `.ts` and leaves `.spec` glued on, so the
+    prefix never matched a single directory and the page snapshot below was never once read.
+    A healer that thinks it has the failing page's DOM, and silently doesn't, is worse than
+    one that knows it doesn't."""
+    return re.sub(r"\.spec\.ts$", "", spec_name)[:24].lower()
+
+
+def failure_artifacts(webqa: Path, spec_name: str, artifacts_dir: Path | None = None) -> dict:
     """error-context.md content + failure screenshot paths for a spec, harvested from
     playwright's test-results/. The error-context file carries an ARIA snapshot of the
     page AT THE MOMENT of failure — far stronger healing input than the error text alone.
-    Playwright truncates result-dir names, so match on a raw name prefix."""
+    Playwright truncates result-dir names, so match on a raw name prefix.
+
+    `artifacts_dir` points at an archived copy (`reports/<run-id>/test-results`); playwright
+    wipes the live `test-results/` at the start of every run, so healing from an older
+    report needs the archive."""
     out: dict = {"error_context": None, "screens": []}
-    tr = webqa / "test-results"
+    tr = artifacts_dir or (webqa / "test-results")
     if not tr.is_dir():
         return out
-    prefix = Path(spec_name).stem[:24].lower()
+    prefix = artifact_prefix(spec_name)
     for d in sorted(tr.iterdir()):
         if not d.is_dir() or not d.name.lower().startswith(prefix):
             continue
         ec = d / "error-context.md"
         if ec.is_file() and out["error_context"] is None:
-            out["error_context"] = ec.read_text(encoding="utf-8", errors="ignore")[:4000]
+            out["error_context"] = ec.read_text(encoding="utf-8", errors="ignore")[:ERROR_CONTEXT_CHARS]
         out["screens"] += [str(p) for p in sorted(d.glob("*.png"))]
     return out
+
+
+def artifacts_for_report(webqa: Path, report_path: Path) -> Path | None:
+    """The test-results/ that belongs to THIS report, not to whatever ran last.
+
+    `matrix` writes `reports/<run-id>/matrix/playwright-results.json` next to
+    `reports/<run-id>/test-results/`. Healing an old report against the live directory means
+    feeding the healer another run's page snapshots — confidently, and wrongly."""
+    for cand in (report_path.parent / "test-results",
+                 report_path.parent.parent / "test-results"):
+        if cand.is_dir():
+            return cand
+    legacy = webqa / "test-results"
+    return legacy if legacy.is_dir() else None
 
 
 def failure_context_section(error_context: str | None) -> str:
@@ -197,6 +247,9 @@ def rerun_is_flaky(webqa: Path, spec_name: str, times: int, workers: int | None,
     out_json = webqa / "reports" / f"rerun-{Path(spec_name).stem}.json"
     out_json.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_NAME=str(out_json))
+    # Its own output dir, or this rerun deletes the very failure artifacts the healer is
+    # about to read: playwright clears outputDir on start, and the reruns run BEFORE heal_one.
+    env["WEBQA_OUTPUT_DIR"] = str(webqa / "reports" / "rerun-test-results")
     if viewport:
         env["WEBQA_VIEWPORT"] = viewport
     cmd = ["npx", "playwright", "test", f"specs/{spec_name}", "--reporter=json",
@@ -255,10 +308,11 @@ def record_app_bug(proj_dir: Path, spec_name: str, description: str) -> None:
 
 def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
              apply_fix: bool, seed_section: str = "",
-             proj: dict | None = None) -> tuple[str, str | None, str | None, str, str, str | None]:
+             proj: dict | None = None,
+             artifacts_dir: Path | None = None) -> tuple[str, str | None, str | None, str, str, str | None]:
     """Returns (spec_name, out_file_or_None, error_or_None, kind, detail, probe_warning).
     kind: 'fix' | 'transient' | 'app-bug'."""
-    artifacts = failure_artifacts(webqa, spec_path.name)
+    artifacts = failure_artifacts(webqa, spec_path.name, artifacts_dir)
     prompt = FIX_PROMPT.format(
         app_context=app_context,
         seed_section=seed_section,
@@ -322,6 +376,10 @@ def main() -> int:
     ap.add_argument("--reruns", type=int, default=0,
                     help="before healing, re-run a signature-clean failing spec N times; "
                          "if it ever passes it's a flake (retry, don't heal). Default 0 (off)")
+    ap.add_argument("--artifacts-dir",
+                    help="archived test-results/ to read failure page snapshots from "
+                         "(reports/<run-id>/test-results). Default: the live test-results/, "
+                         "which playwright wipes at the start of every run")
     args = ap.parse_args()
     if args.max_usd is not None:
         os.environ["WEBQA_MAX_USD"] = str(args.max_usd)
@@ -337,7 +395,8 @@ def main() -> int:
         report_path = webqa / "reports" / "maintain-playwright-results.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         print("[maintain] running playwright to collect failures…", file=sys.stderr)
-        run_playwright_json(webqa, report_path, args.pw_workers or proj.get("workers"), viewport_env(proj))
+        run_playwright_json(webqa, report_path, args.pw_workers or proj.get("workers"),
+                            viewport_env(proj), webqa / "reports" / "test-results")
     if not report_path.is_file():
         print(json.dumps({"error": f"no report at {report_path}"}), file=sys.stderr)
         return 2
@@ -347,6 +406,18 @@ def main() -> int:
         print(json.dumps({"healed": [], "errors": [], "note": "no failing specs in report"}))
         return 0
 
+    if args.artifacts_dir:
+        artifacts_dir = Path(args.artifacts_dir)
+        if not artifacts_dir.is_dir():
+            print(json.dumps({"error": f"no artifacts dir at {artifacts_dir}"}), file=sys.stderr)
+            return 2
+    else:
+        artifacts_dir = artifacts_for_report(webqa, report_path)
+    if artifacts_dir:
+        print(f"[maintain] failure artifacts: {artifacts_dir}", file=sys.stderr)
+    else:
+        print("[maintain] no failure artifacts found — healing from error text alone",
+              file=sys.stderr)
     app_context = load_app_context(proj_dir)
     seed_section = seed_prompt_section(load_seed(proj_dir))
     summary = {"healed": [], "transient": [], "app_bugs": [], "errors": [], "probe_warnings": [],
@@ -379,7 +450,8 @@ def main() -> int:
             if not spec_path.is_file():
                 summary["errors"].append({"spec": fname, "error": "spec file not found"})
                 continue
-            futures[pool.submit(heal_one, spec_path, errors, app_context, webqa, args.apply, seed_section, proj)] = fname
+            futures[pool.submit(heal_one, spec_path, errors, app_context, webqa, args.apply,
+                                seed_section, proj, artifacts_dir)] = fname
         for fut in as_completed(futures):
             name, out_file, err, kind, detail, probe_warning = fut.result()
             if probe_warning:
@@ -401,7 +473,7 @@ def main() -> int:
                 print(f"[maintain] OK   {name} → {out_file}", file=sys.stderr)
 
     if args.with_screens:
-        summary["screens"] = {fname: failure_artifacts(webqa, fname)["screens"]
+        summary["screens"] = {fname: failure_artifacts(webqa, fname, artifacts_dir)["screens"]
                               for fname in fails}
 
     summary["llm"] = llm_spend()

@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://ci.codeberg.org/api/badges/c-c0rtex/web-qa/status.svg" alt="CI">
-  <img src="https://img.shields.io/badge/version-0.4.4-blue?style=flat-square" alt="Version 0.4.4">
+  <img src="https://img.shields.io/badge/version-0.5.0-blue?style=flat-square" alt="Version 0.5.0">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/uv-managed-DE5FE9?style=flat-square" alt="uv">

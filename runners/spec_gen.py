@@ -34,7 +34,13 @@ from run_scenarios import (DEFAULT_BACKEND_PREFIXES, declared_type, extract_path
                            split_tcs, tc_roles, tc_routes)
 
 
-MAX_CONTEXT_CHARS = 24000
+# The map now stores whole ARIA snapshots (explore stopped rationing them), and slice_aria
+# keeps only the routes of the TC at hand — usually one or two. A real page snapshot runs
+# 10–14 KB, so the old 24 KB ceiling would have truncated the very thing we widened.
+MAX_CONTEXT_CHARS = 48000
+ARIA_SLICE_BUDGET = 26000   # shared across the snapshots this TC actually visits
+ARIA_SLICE_MIN = 6000       # …but never rationed below a usable page
+DEFAULT_TEST_TIMEOUT_MS = 60_000
 GEN_ATTEMPTS = 2  # initial + one retry with playwright parse error fed back
 
 # --- LLM spend controls ----------------------------------------------------
@@ -63,6 +69,7 @@ PROJECT CONTEXT:
 - Backend API base URL: {backend_url}
 - Test credentials: email="{login_email}" password="{login_password}"
 - AUTH FLOW (follow EXACTLY, do not invent cookies or headers): {auth_login_hint}
+- Playwright TEST TIMEOUT for this project: {test_timeout_ms} ms (whole test, all steps)
 {seed_section}
 
 APP MAP (auto-crawled; REAL routes, form fields, button labels and table headers — trust it over guesses):
@@ -85,6 +92,17 @@ REQUIREMENTS:
   2) `getByRole` with the accessible name (the ARIA snapshots in the APP MAP are ground truth
   for role/name), 3) `getByLabel` / `getByText`. NEVER CSS classes, XPath or positional nth()
 - Selector texts/labels MUST come from the APP MAP above when the route is listed there — do not invent button captions
+- Take the ROLE from the snapshot too, not from what the widget looks like. A picker rendered
+  as `combobox` is not `getByRole('button')`, and the visible caption inside it is a child
+  node, not the element's accessible name
+- If the snapshot shows an element with NO accessible name (a bare `- textbox` under a
+  separate `- text: Title` node, `- button` with no quoted caption), then `getByLabel(...)`
+  and `getByRole(..., {{ name }})` CANNOT match it — the app has no label association there.
+  Locate it structurally instead (`getByRole('dialog').getByRole('textbox').nth(i)`, or
+  `locator('input').near(page.getByText('Title'))`) and add a `// NOTE: unlabeled input` comment
+- When a name occurs more than once in the snapshot, scope before matching
+  (`page.getByRole('navigation').getByRole('link', {{ name: 'X' }})`) — an unscoped locator
+  that resolves to 2+ elements fails on strict mode, not on the app being wrong
 - For navigation ALWAYS: `await page.goto('{frontend_url}<path>', {{ waitUntil: 'domcontentloaded' }})` —
   never the default 'load' and never 'networkidle': Next.js dev keeps an HMR websocket open, so
   those states never settle and the test burns its whole timeout
@@ -96,24 +114,38 @@ REQUIREMENTS:
 - Do not hardcode IDs — use `?` if TC is generic about which entity, or pick a plausible id
 - Keep the spec self-contained; no external helpers
 
+API CONTRACT RULE (the APP MAP states the contract — never guess it):
+- The `Backend endpoints` section gives, per operation, the SUCCESS STATUS CODE and the
+  RESPONSE SHAPE. Assert the code it declares (a POST that declares `201` must not be
+  asserted `toBe(200)`), and unwrap the shape it declares. If the shape is
+  `{{items:array, total:integer}}`, then `(await r.json()).filter(...)` is a crash, not a test
+- Comparing a wire enum (`Enum values` section) against a label the UI renders for it is
+  wrong even when both sides are right. Compare wire values to wire values, UI text to UI text
+
 DATA CORRECTNESS RULE (a page that renders is not a page that is right):
 - When an Expected bullet names a value the app DERIVES from data — a KPI, a total, a count,
-  a ranking, a currency sum — compute the expected value inside the test from the backend's
-  PRIMARY collections and assert the UI shows exactly that:
-      const r = await page.request.get('{backend_url}/<primary-collection>');
-      expect(r.status()).toBe(200);
-      const rows = await r.json();
-      const expected = rows.filter(...).reduce(...);      // derive the truth yourself
-      await expect(page.getByTestId('<tile>')).toHaveText(String(expected));
+  a ranking, a currency sum — assert the VALUE, not its presence. Pick the strongest oracle
+  the API actually supports, in this order:
+  1. DRILL-DOWN / ROUND-TRIP (preferred): the app itself already offers the detailed view
+     behind the summary. Click the tile, open the filtered list, and assert the summary
+     equals what the detail view shows. Both come from the app, so no definition is invented
+  2. MUTATION INVARIANT: read the value, perform a UI action with a known effect, read it
+     again, assert the DELTA. A wrong absolute value cannot fake a correct delta
+  3. RE-IMPLEMENTATION (last resort): recompute the value from primary collections. Allowed
+     ONLY if the APP MAP or the TC states the metric's definition, and then you MUST write
+     that definition in a comment above the computation, including its UNIT (rows? entities?
+     currency? which currency?). A re-implemented oracle is a SECOND UNVERIFIED
+     IMPLEMENTATION: if you count invoices where the app counts orders, the test is red and
+     the app is right
 - NEVER derive the expected value from the SAME aggregate/summary endpoint the page itself
   calls. That endpoint is part of what is under test: if its aggregation is wrong, the UI and
-  your oracle are wrong together and the test passes on a broken feature. Go to the primary
-  collections the aggregate is built from
+  your oracle are wrong together and the test passes on a broken feature
 - Zero, empty and "—" are values a broken aggregate loves to return. Asserting "a number is
-  rendered" or "no NaN appears" catches none of it
-- If the API genuinely exposes no independent oracle, say so in a comment and assert the
-  strongest invariant you can instead (ordering, non-negativity, sum of the parts equals the
-  displayed total, count of rows equals a displayed counter) — never fall back to `toBeVisible`
+  rendered" or "no NaN appears" catches none of it. But "—" is also how a UI renders "nothing
+  here" — do not assert it equals `''`
+- If none of the three oracles is available, say so in a comment and assert the strongest
+  invariant you can (ordering, non-negativity, sum of the parts equals the displayed total,
+  row count equals a displayed counter) — never fall back to `toBeVisible`
 
 UI-FIRST RULE (what makes the spec worth anything):
 - Every user-visible step of the TC MUST be performed through the UI — real clicks on real
@@ -123,6 +155,32 @@ UI-FIRST RULE (what makes the spec worth anything):
 - `page.request` / API calls are allowed ONLY for: authentication, creating/deleting test
   data (setup/teardown), side-verification of state AFTER a UI action, and reading an
   INDEPENDENT ORACLE to check a displayed value against (see DATA CORRECTNESS RULE)
+- OPEN THE PAGE FIRST, compute the oracle SECOND. A spec that queries the API before its
+  first `page.goto` and then fails leaves playwright screenshotting `about:blank` — the one
+  artifact a human needs to judge the failure is blank
+
+AUTH RULE (the single most common way these specs die):
+- Use the credentials given above VERBATIM. Never invent an email, never pattern-match one
+  from another account's domain
+- `page.request` shares the BROWSER context: it carries session cookies, and nothing else.
+  If the AUTH FLOW returns a bearer token, every call to {backend_url} must go through a
+  request context that sends it — `request.newContext({{ extraHTTPHeaders: {{ Authorization:
+  `Bearer ${{token}}` }} }})`. `page.request.get(API_URL)` without that header is a 401
+- The only legitimate use of `page.request` against {backend_url} is the login POST itself
+
+TIMING BUDGET (the test has {test_timeout_ms} ms in total):
+- Every explicit `timeout:` you write must be well under {test_timeout_ms} ms. A
+  `waitFor({{ timeout: 60000 }})` inside a 30 s test cannot ever fire: playwright kills the
+  test first and reports a bare "Test timeout exceeded" naming nothing
+- Do not add explicit timeouts at all unless a step is genuinely slow (upload, async parse).
+  The project already bounds actions and navigations; web-first assertions auto-wait
+- NEVER use `page.waitForTimeout()` — assert on the condition you are actually waiting for
+
+FIXTURE RULE:
+- Never reference a file path that you have not created in the test. To upload, build the
+  file in memory: `setInputFiles({{ name: 'x.pdf', mimeType: 'application/pdf',
+  buffer: Buffer.from(...) }})`. A path like `fixtures/sample.pdf` that nobody generates is
+  an ENOENT, not a test
 
 MUTATING DATA POLICY (applies when the TC creates/edits/deletes data):
 - NEVER mutate pre-existing data. The test must create its OWN target entity via the backend API
@@ -464,6 +522,10 @@ def slice_aria(md: str, routes: set[str]) -> str:
     kept = [m.group(0) for m in entries if _route_match(m.group(1), routes)]
     if not kept:
         return md            # TC touches nothing we mapped — better the whole section than none
+    # The prompt budget belongs here, where we know how few snapshots survive the slice —
+    # not in explore, where dividing it across every route in the app starved all of them.
+    per = max(ARIA_SLICE_MIN, ARIA_SLICE_BUDGET // len(kept))
+    kept = [k if len(k) <= per else k[:per] + "\n# …(snapshot clipped)\n```" for k in kept]
     note = (f"_(showing {len(kept)} of {len(entries)} route snapshots — "
             f"the ones this test case visits)_")
     return md[:start] + header + "\n\n" + note + "\n\n" + "\n".join(kept) + "\n" + md[end:]
@@ -557,6 +619,32 @@ def load_app_context(proj_dir: Path, routes: set[str] | None = None,
     return ctx
 
 
+# `timeout: 30_000` and the template's `timeout: Number(process.env.WEBQA_TEST_TIMEOUT ?? 60_000)`.
+# Anchored at line start so `expect: { timeout: 8_000 }` — a different budget — cannot match.
+RE_PW_TIMEOUT = re.compile(r"^\s*timeout:\s*(?:Number\([^)]*\?\?\s*)?([0-9_]+)", re.MULTILINE)
+
+
+def read_test_timeout(webqa: Path) -> int:
+    """The project's playwright `timeout:` (whole-test budget), in ms.
+
+    The generator cannot respect a budget it was never told. Left to itself it writes
+    `waitFor({timeout: 60000})` into a 30 s test, which playwright kills at 30 s with a
+    message that names no locator and no step."""
+    env = os.environ.get("WEBQA_TEST_TIMEOUT")
+    if env and env.strip().isdigit():
+        return int(env.strip())
+    cfg = webqa / "playwright.config.ts"
+    if not cfg.is_file():
+        return DEFAULT_TEST_TIMEOUT_MS
+    m = RE_PW_TIMEOUT.search(cfg.read_text(encoding="utf-8"))
+    if not m:
+        return DEFAULT_TEST_TIMEOUT_MS
+    try:
+        return int(m.group(1).replace("_", ""))
+    except ValueError:
+        return DEFAULT_TEST_TIMEOUT_MS
+
+
 def load_seed(proj_dir: Path) -> str:
     """Optional committed .web-qa/seed.spec.ts — human-verified auth/setup code. Far stronger
     grounding than a prose auth hint: the model reuses working patterns instead of inventing."""
@@ -634,10 +722,12 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     app_map_digest = load_app_context(proj_dir)
     seed = load_seed(proj_dir)
     seed_section = seed_prompt_section(seed)
+    test_timeout_ms = read_test_timeout(webqa)
     frontend_dir = proj_dir / proj["frontend_dir"] if proj.get("frontend_dir") else proj_dir
     dnd_section = dnd_recipe_section(detect_dnd_library(frontend_dir))
     # Cache key covers everything that shapes the output: TC body + template + app map + seed + urls
-    env_hash = tc_hash(PROMPT_TEMPLATE + app_map_digest + seed + frontend_url + backend_url + dnd_section)
+    env_hash = tc_hash(PROMPT_TEMPLATE + app_map_digest + seed + frontend_url + backend_url
+                       + dnd_section + str(test_timeout_ms))
 
     md_files = sorted(scenarios_dir.glob("*.md"))
     if not md_files:
@@ -685,6 +775,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 login_password=tc_password,
                 test_data_prefix=test_data_prefix,
                 auth_login_hint=auth_login_hint,
+                test_timeout_ms=test_timeout_ms,
                 seed_section=seed_section,
                 app_context=load_app_context(proj_dir, tc_routes(tc.get("body", "")),
                                              tc_api_groups(tc.get("body", ""), backend_prefixes)),

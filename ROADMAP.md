@@ -6,6 +6,66 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.5.0 (the runners stop guessing what they were never told)
+
+A full run over a real app produced 52 failing specs. Four were candidate product bugs. The
+rest were the tool asking the model to invent facts it already had, or had thrown away. Each
+item below is one of those failure modes, traced to its cause.
+
+- **The map carried no API contract.** The OpenAPI section listed paths, methods and request
+  fields — never the success status code, never the response shape, never an enum's wire
+  values. So the generator guessed: `(await r.json()).filter(...)` on a paginated envelope is
+  a `TypeError`, a `201` asserted as `200` is a red test against a correct API, and a wire
+  enum compared against the label the UI renders for it is wrong even when both sides are
+  right. `explore` now mines all three. Deterministic, zero tokens
+- **ARIA snapshots were rationed to uselessness.** v0.4.3 shared a 16 KB budget evenly across
+  every route; on a 47-route app that is 400 characters each — a page title and two nodes.
+  The budget existed because the whole map used to ride in every prompt. It doesn't:
+  `slice_aria` sends only the routes of the test case at hand. The cap moved there, and the
+  map now stores what was actually captured
+- **The generator was never told the test budget.** It wrote `waitFor({timeout: 60000})` into
+  a 30-second test. Playwright killed the test from the outside and reported
+  `Test timeout of 30000ms exceeded.` — naming no locator and no step. The budget is now
+  stated in the prompt, read from the project's own config, and the template's budget is
+  long enough for a legitimately slow upload
+- **`maintain` never once read the page snapshot it prompts with.** `Path(name).stem` leaves
+  `.spec` glued on, so the prefix never matched a single playwright result directory. The
+  healer believed it had the failing page's DOM and silently didn't. It does now — and
+  `--artifacts-dir` lets it heal from an archived run
+- **The failure evidence was destroyed by the next run.** Playwright deletes its output dir
+  at the start of every run, and every run shared one. The matrix kept the json and nothing
+  else. Each run now owns its `reports/<run-id>/test-results/`, traces included; old ones are
+  pruned to `--keep-artifacts` (default 3). `maintain` derives the folder from the report it
+  was given, so an old report heals against its own snapshots — and `--reruns`, which used to
+  run playwright before the healer read anything, no longer erases what it is about to read
+- **The mutation gate covered half the pipeline.** Only the passive runner honoured
+  `**Type:** mutating`; the specs stage handed every `.spec.ts` to playwright regardless. A
+  run that reported 78 mutating test cases as `✋ manual` had already created, edited and
+  deleted rows. Specs are now labelled `spec (mutating)`, and `--no-mutations` means it
+- **A report could not say what produced it.** `matrix.json` recorded stats and never argv.
+  Whether a run skipped a stage, used two workers, or wrote to the database was
+  unreconstructable. It records `invocation` now
+- **`api_login` returned the login response and called it the user.** For a JWT app that is
+  `{access_token, token_type}`, so every report said `Logged-in: None (None)` and `doctor`'s
+  per-role check proved only that the password was right — never that the account holds the
+  role the RBAC test cases run under. It reads the identity endpoint (`auth_me_path`)
+- **The oracle rule created false positives.** "Recompute the metric from primary
+  collections" makes the spec a second, unverified implementation of the thing it checks —
+  count the wrong entity and the test is red while the app is right. Both prompts now prefer
+  drill-down (assert the summary against the detail view the app itself renders) and
+  mutation deltas; recomputation is a last resort that must cite the definition and state its
+  unit. `maintain` will not call a recomputed mismatch a product bug, and knows that a
+  `[disabled]` control is not a permission leak
+- **Screenshots of failures were blank.** Specs queried the API before the first `page.goto`,
+  so the artifact a human needs was `about:blank`. The prompt opens the page first
+- **`doctor` checks the config against the template's invariants.** The template is copied
+  once at setup and every later fix is absent from every existing project — silently. A
+  `use.viewport` shadowed by a device descriptor, a missing `actionTimeout`, a test budget
+  shorter than a slow upload: all reported, with the template to re-copy
+- Also: unlabeled inputs and non-unique names are named in the prompt as what they are — an
+  app defect and a scoping mistake — instead of being met with a locator that cannot match;
+  and generated specs no longer invent credentials or fixture paths
+
 ## Shipped — v0.4.4 (examples belong to nobody)
 
 Docs, prompt examples and tests quoted routes, button captions, KPI names and enum labels

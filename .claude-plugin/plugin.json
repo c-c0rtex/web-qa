@@ -1,7 +1,7 @@
 {
   "name": "web-qa",
   "displayName": "Web QA",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "description": "Autonomous web-app QA: Playwright E2E, visual regression, axe-core accessibility — scenarios generated from a git diff or a task, specs grounded in a crawled app map, zero-token test runs, self-healing failures.",
   "author": { "name": "c-c0rtex", "url": "https://codeberg.org/c-c0rtex" },
   "homepage": "https://codeberg.org/c-c0rtex/web-qa",

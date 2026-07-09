@@ -24,11 +24,22 @@ const [vpWidth, vpHeight] = (process.env.WEBQA_VIEWPORT ?? '1280x900')
 export default defineConfig({
   testDir: './specs',
   testMatch: '**/*.spec.ts',
+  // WEBQA_OUTPUT_DIR is set by web-qa-matrix / web-qa-maintain to that run's own folder.
+  // Playwright DELETES its output dir at the start of every run, so a shared default means
+  // run N+1 destroys run N's screenshots, traces and error-context page snapshots — the only
+  // artifacts that explain a failure after the fact. One run, one folder.
+  outputDir: process.env.WEBQA_OUTPUT_DIR ?? 'test-results',
   fullyParallel: false,
   // WEBQA_WORKERS=4 is safe for read-only suites; keep 1 when mutating specs share backend state
   workers: Number(process.env.WEBQA_WORKERS ?? 1),
   reporter: [['list'], ['json', { outputFile: 'reports/playwright-results.json' }]],
-  timeout: 30_000,
+  // Whole-test budget. Deliberately generous: a genuinely slow step (file upload, async
+  // parse) legitimately waits ~30s, and when the test budget was 30s such a step killed the
+  // test from the outside — producing a bare "Test timeout of 30000ms exceeded." that names
+  // no locator and no step. Fast failure is bought by actionTimeout/navigationTimeout below,
+  // which bound each individual operation; the test budget only needs to bound the whole.
+  // spec-gen reads this value and forbids generated waits from exceeding it.
+  timeout: Number(process.env.WEBQA_TEST_TIMEOUT ?? 60_000),
   expect: { timeout: 8_000 },
   // 2 retries in CI separate transient flakes from real failures; 0 locally for fast feedback
   retries: process.env.CI ? 2 : 0,

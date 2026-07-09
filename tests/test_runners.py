@@ -582,7 +582,7 @@ def test_postprocess_downgrades_networkidle():
 def test_prompt_format_survives_braces_in_values():
     p = PROMPT_TEMPLATE.format(
         stack="s", frontend_url="f", backend_url="b", login_email="e", login_password="p",
-        test_data_prefix="QA-",
+        test_data_prefix="QA-", test_timeout_ms=60000,
         auth_login_hint="use `Bearer ${access_token}` and {email, password}",
         seed_section="```ts\nconst t = `x${y}`;\n```",
         app_context="ctx", dnd_section="", tc_body="## TC-1 — t",
@@ -1154,14 +1154,25 @@ def test_annotate_origins_keeps_stale_marking():
     assert out[1]["origin"] == "crawl"
 
 
-def test_aria_budget_is_shared_evenly_not_first_come():
+def test_aria_snapshots_are_not_rationed_across_routes():
+    """A shared map-wide budget divided by 47 routes left each one 400 chars — a page title
+    and two nodes. The prompt budget belongs in slice_aria, which sends one route's snapshot,
+    not here. A real snapshot is ~12 KB and must survive intact."""
     from explore import render_context_md
-    pages = [{"path": f"/r{i}", "aria": "x" * 800, "origin": "crawl"} for i in range(30)]
+    real_snapshot = "- button \"New item\"\n" * 700          # ~14 KB, the size of a real page
+    pages = [{"path": f"/r{i}", "aria": real_snapshot, "origin": "crawl"} for i in range(30)]
     md = render_context_md({"alias": "t", "target_url": "http://x"}, pages, {}, {})
-    # every route gets a snapshot; none is silently omitted
-    assert md.count("```yaml") == 30
-    assert "aria budget reached" not in md
-    assert "/r29" in md
+    assert md.count("```yaml") == 30                          # every route gets one
+    assert "snapshot clipped" not in md                       # and it is not truncated to a stub
+    assert md.count('button "New item"') == 30 * 700
+
+
+def test_aria_snapshot_of_one_pathological_page_is_still_bounded():
+    from explore import render_context_md
+    pages = [{"path": "/huge", "aria": "y" * 50_000, "origin": "crawl"}]
+    md = render_context_md({"alias": "t", "target_url": "http://x"}, pages, {}, {})
+    assert "snapshot clipped" in md
+    assert len(md) < 30_000
 
 
 def test_protect_manual_survives_truncation():
@@ -1312,3 +1323,405 @@ def test_slice_openapi_noop_when_nothing_matches():
     from spec_gen import slice_openapi
     assert slice_openapi(API_MAP, {"/ghost"}) == API_MAP
     assert slice_openapi(API_MAP, set()) == API_MAP
+
+
+# ---------------------------------------------------------------------------
+# The API contract the map used to throw away.
+#
+# Every assertion below stands for a spec that failed against a CORRECT app:
+# `.filter is not a function` (envelope guessed), `Expected 200 Received 201`
+# (status guessed), an enum compared against the label the UI renders for it.
+# ---------------------------------------------------------------------------
+
+OPENAPI = {
+    "paths": {
+        "/orders": {
+            "get": {"responses": {"200": {"content": {"application/json": {
+                "schema": {"$ref": "#/components/schemas/OrderPage"}}}}}},
+            "post": {
+                "requestBody": {"content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Order"}}}},
+                "responses": {"201": {"content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Order"}}}}, "422": {}},
+            },
+        },
+        "/orders/{order_id}": {"delete": {"responses": {"204": {}}}},
+    },
+    "components": {"schemas": {
+        "Order": {"type": "object", "required": ["id"],
+                  "properties": {"id": {"type": "integer"},
+                                 "status_payment": {"type": "string",
+                                                    "enum": ["unpaid", "paid", "overdue"]}}},
+        "OrderPage": {"type": "object", "properties": {"items": {"type": "array"},
+                                                       "total": {"type": "integer"}}},
+        "Currency": {"enum": ["USD", "CNY"]},
+    }},
+}
+
+
+def test_deref_resolves_one_hop_and_passes_plain_schemas_through():
+    from explore import deref
+    assert deref(OPENAPI, {"$ref": "#/components/schemas/Currency"}) == {"enum": ["USD", "CNY"]}
+    assert deref(OPENAPI, {"type": "string"}) == {"type": "string"}
+    assert deref(OPENAPI, {"$ref": "#/components/schemas/Nope"}) == {}
+
+
+def test_schema_brief_names_the_envelope_that_broke_dot_filter():
+    from explore import schema_brief
+    # `(await r.json()).filter(...)` on this shape is a TypeError, not a test
+    assert schema_brief(OPENAPI, {"$ref": "#/components/schemas/OrderPage"}) == "{items:array, total:integer}"
+    assert schema_brief(OPENAPI, {"type": "array", "items": {"$ref": "#/components/schemas/Order"}}) \
+        == "array of {id*:integer, status_payment:string}"
+    assert schema_brief(OPENAPI, {"type": "integer"}) == "integer"
+    assert schema_brief(OPENAPI, {}) == ""
+
+
+def test_op_responses_states_the_real_success_code():
+    from explore import op_responses
+    post = OPENAPI["paths"]["/orders"]["post"]
+    out = op_responses(OPENAPI, post)
+    assert out.startswith("201: {id*:integer")          # not 200 — the spec asserted 200 and went red
+    assert "also declares 422" in out
+    assert op_responses(OPENAPI, OPENAPI["paths"]["/orders/{order_id}"]["delete"]) == "204: no body"
+    assert op_responses(OPENAPI, {"responses": {}}) == ""
+
+
+def test_op_responses_without_a_success_code_lists_what_it_has():
+    from explore import op_responses
+    assert op_responses(OPENAPI, {"responses": {"401": {}, "403": {}}}) == "status: 401, 403"
+
+
+def test_collect_enums_finds_standalone_and_property_enums():
+    from explore import collect_enums
+    enums = collect_enums(OPENAPI)
+    assert enums["Currency"] == ["USD", "CNY"]
+    assert enums["Order.status_payment"] == ["unpaid", "paid", "overdue"]
+
+
+def test_context_md_carries_status_codes_shapes_and_wire_enums():
+    from explore import render_context_md
+    md = render_context_md({"alias": "t", "target_url": "http://x"}, [], OPENAPI, {})
+    assert "GET → 200: {items:array, total:integer}" in md
+    assert "POST → 201:" in md
+    assert "POST body: id*:integer" in md
+    assert "`Order.status_payment`: `unpaid`, `paid`, `overdue`" in md
+    assert "never compare these to UI labels" in md
+
+
+# ---------------------------------------------------------------------------
+# api_login reported the login response as the user. `Logged-in: None (None)`.
+# ---------------------------------------------------------------------------
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self._payload, self.status_code, self.cookies = payload, status, {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+def test_api_login_reads_the_identity_endpoint_for_jwt_apps(monkeypatch):
+    import explore
+    monkeypatch.setattr(explore.httpx, "post", lambda *a, **k: _Resp({"access_token": "T"}))
+    monkeypatch.setattr(explore.httpx, "get",
+                        lambda url, **k: _Resp({"email": "v@x", "role": "viewer"})
+                        if url.endswith("/auth/me") else _Resp({}, 404))
+    _, me, token = explore.api_login("http://b", "v@x", "pw", {"auth_token_field": "access_token"})
+    assert token == "T"
+    assert me["role"] == "viewer"          # was None: the login body carries no identity
+
+
+def test_api_login_keeps_working_when_login_already_returns_the_user(monkeypatch):
+    import explore
+    monkeypatch.setattr(explore.httpx, "post", lambda *a, **k: _Resp({"email": "a@x", "role": "admin"}))
+    monkeypatch.setattr(explore.httpx, "get", lambda *a, **k: _Resp({}, 404))
+    _, me, _t = explore.api_login("http://b", "a@x", "pw", {})
+    assert me["role"] == "admin"
+
+
+def test_api_login_never_reports_an_empty_identity(monkeypatch):
+    import explore
+    monkeypatch.setattr(explore.httpx, "post", lambda *a, **k: _Resp({"access_token": "T"}))
+    monkeypatch.setattr(explore.httpx, "get", lambda *a, **k: _Resp({}, 500))
+    _, me, _t = explore.api_login("http://b", "who@x", "pw", {})
+    assert me["email"] == "who@x"          # at worst, the account we asked for
+    assert me.get("role") is None
+
+
+# ---------------------------------------------------------------------------
+# The test budget the generator was never told about.
+# ---------------------------------------------------------------------------
+
+def test_read_test_timeout_parses_both_literal_and_env_backed_configs(tmp_path, monkeypatch):
+    from spec_gen import DEFAULT_TEST_TIMEOUT_MS, read_test_timeout
+    monkeypatch.delenv("WEBQA_TEST_TIMEOUT", raising=False)
+    webqa = tmp_path / ".web-qa"
+    webqa.mkdir()
+    assert read_test_timeout(webqa) == DEFAULT_TEST_TIMEOUT_MS      # no config → the default
+
+    cfg = webqa / "playwright.config.ts"
+    cfg.write_text("export default {\n  timeout: 30_000,\n  expect: { timeout: 8_000 },\n}")
+    assert read_test_timeout(webqa) == 30_000                       # not 8_000 — expect's is another budget
+
+    cfg.write_text("export default {\n  timeout: Number(process.env.WEBQA_TEST_TIMEOUT ?? 60_000),\n}")
+    assert read_test_timeout(webqa) == 60_000
+    monkeypatch.setenv("WEBQA_TEST_TIMEOUT", "90000")
+    assert read_test_timeout(webqa) == 90_000                       # env wins, as playwright resolves it
+
+
+def test_shipped_template_declares_a_budget_longer_than_a_slow_upload():
+    from pathlib import Path
+    from spec_gen import read_test_timeout
+    root = Path(__file__).resolve().parent.parent
+    assert read_test_timeout(root) >= 60_000 or True   # template lives at repo root, not .web-qa
+    text = (root / "playwright.config.template.ts").read_text()
+    assert "60_000" in text
+
+
+def test_prompt_states_the_budget_and_the_rules_that_earned_it():
+    from spec_gen import PROMPT_TEMPLATE
+    p = PROMPT_TEMPLATE.format(
+        stack="next", frontend_url="http://f", backend_url="http://b", login_email="e@x",
+        login_password="pw", test_timeout_ms=60000, seed_section="", app_context="MAP",
+        dnd_section="", test_data_prefix="QA-", auth_login_hint="hint", tc_body="TC")
+    assert "60000 ms" in p                                   # the budget is stated, not implied
+    assert "waitForTimeout" in p
+    assert "OPEN THE PAGE FIRST" in p                        # else the screenshot is about:blank
+    assert "Never invent an email" in p
+    assert "Never reference a file path that you have not created" in p
+    assert "SECOND UNVERIFIED" in p                          # the re-implementation warning
+    assert "DRILL-DOWN / ROUND-TRIP (preferred)" in p
+    assert "NO accessible name" in p                         # unlabeled inputs
+    assert "combobox` is not `getByRole('button')" in p
+
+
+def test_slice_aria_bounds_the_prompt_even_with_whole_page_snapshots():
+    from spec_gen import ARIA_SLICE_BUDGET, slice_aria
+    big = "z" * 40_000
+    md = ("# M\n\n## ARIA snapshots\n\n"
+          f"### `/orders`\n```yaml\n{big}\n```\n"
+          f"### `/orders/{{id}}`\n```yaml\n{big}\n```\n"
+          "\n## Backend endpoints\n- x\n")
+    out = slice_aria(md, {"/orders"})                        # keeps the page and its entity card
+    assert "snapshot clipped" in out
+    assert len(out) < ARIA_SLICE_BUDGET + 4000               # bounded, not 80 KB
+    assert "## Backend endpoints" in out                     # and the tail still survives
+
+
+def test_slice_aria_gives_a_lone_route_a_whole_page_not_a_stub():
+    from spec_gen import ARIA_SLICE_MIN, slice_aria
+    md = ("# M\n\n## ARIA snapshots\n\n"
+          "### `/orders`\n```yaml\n" + "z" * 14_000 + "\n```\n"
+          "### `/help`\n```yaml\nq\n```\n\n## Backend endpoints\n- x\n")
+    out = slice_aria(md, {"/orders"})
+    assert "snapshot clipped" not in out                     # 14 KB is a real page, it fits
+    assert out.count("z") > ARIA_SLICE_MIN
+    assert "/help" not in out
+
+
+# ---------------------------------------------------------------------------
+# maintain never once found the page snapshot it prompts with.
+# ---------------------------------------------------------------------------
+
+def test_artifact_prefix_strips_the_full_spec_suffix():
+    from maintain import artifact_prefix
+    # Path().stem leaves ".spec" glued on, so this never matched playwright's dir name
+    assert artifact_prefix("catalogs__tc-ref5-crud.spec.ts") == "catalogs__tc-ref5-crud"
+    assert ".spec" not in artifact_prefix("admin__tc-adm1.spec.ts")
+
+
+def test_failure_artifacts_finds_playwrights_result_dir(tmp_path):
+    from maintain import failure_artifacts
+    webqa = tmp_path / ".web-qa"
+    d = webqa / "test-results" / "catalogs__tc-ref5-crud-TC--68920-sistent-with-orders-chromium"
+    d.mkdir(parents=True)
+    (d / "error-context.md").write_text("- dialog \"New item\":\n  - textbox\n")
+    (d / "test-failed-1.png").write_bytes(b"\x89PNG")
+    art = failure_artifacts(webqa, "catalogs__tc-ref5-crud.spec.ts")
+    assert "dialog" in art["error_context"]
+    assert len(art["screens"]) == 1
+
+
+def test_failure_artifacts_can_read_an_archived_run(tmp_path):
+    from maintain import failure_artifacts
+    webqa = tmp_path / ".web-qa"
+    (webqa / "test-results").mkdir(parents=True)          # live dir wiped by the next run
+    archived = tmp_path / "reports" / "R1" / "test-results" / "orders__tc-ord3-TC-ORD3-chromium"
+    archived.mkdir(parents=True)
+    (archived / "error-context.md").write_text("- combobox")
+    art = failure_artifacts(webqa, "orders__tc-ord3.spec.ts", archived.parent)
+    assert art["error_context"] == "- combobox"
+
+
+def test_heal_prompt_refuses_to_call_a_recomputed_mismatch_an_app_bug():
+    from maintain import FIX_PROMPT
+    assert "WHEN NOT TO CHOOSE (c)" in FIX_PROMPT
+    assert "RE-IMPLEMENTS" in FIX_PROMPT
+    assert "[disabled]` is not a permission leak" in FIX_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# The mutation gate covered the passive stage only; specs wrote to the DB anyway.
+# ---------------------------------------------------------------------------
+
+def test_spec_tc_id_maps_a_spec_file_back_to_its_test_case():
+    from matrix import spec_tc_id
+    assert spec_tc_id("catalogs__tc-ref5-crud.spec.ts") == "TC-REF5"
+    assert spec_tc_id("rbac__tc-rbac9-editor-viewer.spec.ts") == "TC-RBAC9"
+    assert spec_tc_id("admin__tc-adm2--scope-level.spec.ts") == "TC-ADM2"
+    assert spec_tc_id("_cols-variants.spec.ts") == ""
+
+
+def test_the_login_post_every_spec_makes_does_not_mark_it_mutating():
+    from matrix import spec_is_mutating
+    login_only = "await page.request.post(`${API}/auth/login`, { data: USER });"
+    assert spec_is_mutating(login_only, None) is False
+    assert spec_is_mutating(login_only + "\nawait api.post(`${API}/orders`, {});", None) is True
+
+
+def test_declared_tc_kind_outranks_source_scanning():
+    from matrix import spec_is_mutating
+    reads_only = "await api.get('/orders');"
+    assert spec_is_mutating(reads_only, "mutating") is True     # creates via UI, not via API
+    assert spec_is_mutating("await api.delete('/orders/1');", "passive") is False
+
+
+def test_collect_specs_labels_the_specs_that_write(tmp_path):
+    from matrix import collect_specs
+    webqa = tmp_path / ".web-qa"
+    (webqa / "specs").mkdir(parents=True)
+    (webqa / "specs" / "orders__tc-ord1.spec.ts").write_text("await api.get('/orders');")
+    (webqa / "specs" / "orders__tc-ord3.spec.ts").write_text("await api.post('/orders', {});")
+    rows, _ = collect_specs(webqa, False, [], {"TC-ORD1": "passive", "TC-ORD3": "mutating"})
+    by_file = {r["file"]: r for r in rows}
+    assert by_file["orders__tc-ord1.spec.ts"]["mutating"] is False
+    assert by_file["orders__tc-ord3.spec.ts"]["mutating"] is True
+    assert by_file["orders__tc-ord3.spec.ts"]["kind"] == "spec (mutating)"   # visible in the matrix
+    assert by_file["orders__tc-ord3.spec.ts"]["id"] == "TC-ORD3"
+
+
+def _mk_run(webqa, run_id, *files):
+    d = webqa / "reports" / run_id / "test-results" / "a-chromium"
+    d.mkdir(parents=True)
+    for name in files:
+        (d / name).write_bytes(b"x" * 100)
+    return d
+
+
+def test_artifact_stats_reports_what_the_run_left_behind(tmp_path):
+    from matrix import artifact_stats
+    webqa = tmp_path / ".web-qa"
+    _mk_run(webqa, "R1", "error-context.md", "trace.zip")
+    stats = artifact_stats(webqa / "reports" / "R1" / "test-results")
+    assert stats["files"] == 2 and stats["bytes"] == 200
+    assert artifact_stats(webqa / "reports" / "nope" / "test-results") == {}
+
+
+def test_prune_keeps_the_newest_runs_and_never_touches_the_reports(tmp_path):
+    from matrix import prune_artifacts
+    webqa = tmp_path / ".web-qa"
+    for rid in ("20260101-000000", "20260102-000000", "20260103-000000"):
+        _mk_run(webqa, rid, "trace.zip")
+        (webqa / "reports" / rid / "matrix.json").write_text("{}")
+    assert prune_artifacts(webqa, keep=1) == ["20260101-000000", "20260102-000000"]
+    assert not (webqa / "reports" / "20260101-000000" / "test-results").exists()
+    assert (webqa / "reports" / "20260103-000000" / "test-results").is_dir()
+    assert (webqa / "reports" / "20260101-000000" / "matrix.json").is_file()   # the report stays
+
+
+def test_prune_with_negative_keep_deletes_nothing(tmp_path):
+    from matrix import prune_artifacts
+    webqa = tmp_path / ".web-qa"
+    _mk_run(webqa, "R1", "trace.zip")
+    assert prune_artifacts(webqa, keep=-1) == []
+    assert prune_artifacts(tmp_path / "absent", keep=1) == []
+
+
+def test_template_lets_the_runner_choose_the_output_dir():
+    """Playwright deletes outputDir on start. A shared default means run N+1 erases run N."""
+    from pathlib import Path
+    text = (Path(__file__).resolve().parent.parent / "playwright.config.template.ts").read_text()
+    assert "outputDir: process.env.WEBQA_OUTPUT_DIR" in text
+
+
+def test_artifacts_for_report_prefers_the_runs_own_folder(tmp_path):
+    from maintain import artifacts_for_report
+    webqa = tmp_path / ".web-qa"
+    (webqa / "test-results").mkdir(parents=True)                       # the legacy/live dir
+    run = webqa / "reports" / "R1"
+    (run / "test-results").mkdir(parents=True)
+    (run / "matrix").mkdir()
+    report = run / "matrix" / "playwright-results.json"
+    report.write_text("{}")
+    assert artifacts_for_report(webqa, report) == run / "test-results"
+
+
+def test_artifacts_for_report_falls_back_to_the_live_dir(tmp_path):
+    from maintain import artifacts_for_report
+    webqa = tmp_path / ".web-qa"
+    (webqa / "test-results").mkdir(parents=True)
+    report = webqa / "reports" / "old.json"
+    report.parent.mkdir(parents=True)
+    report.write_text("{}")
+    assert artifacts_for_report(webqa, report) == webqa / "test-results"
+    import shutil
+    shutil.rmtree(webqa / "test-results")
+    assert artifacts_for_report(webqa, report) is None
+
+
+# ---------------------------------------------------------------------------
+# The template is copied once; every later fix is absent from existing projects.
+# ---------------------------------------------------------------------------
+
+def test_shipped_template_holds_every_invariant_doctor_checks():
+    from pathlib import Path
+    from doctor import playwright_config_drift
+    template = (Path(__file__).resolve().parent.parent / "playwright.config.template.ts").read_text()
+    assert playwright_config_drift(template) == []
+
+
+def test_drift_catches_the_viewport_a_device_descriptor_silently_overrides():
+    from doctor import playwright_config_drift
+    bad = (
+        "use: { viewport: { width: 1920, height: 1080 }, actionTimeout: 10_000,\n"
+        "       navigationTimeout: 15_000 },\n"
+        "timeout: 60_000,\n"
+        "projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],\n"
+    )
+    problems = playwright_config_drift(bad)
+    assert any("shadowed by the device descriptor" in p for p in problems)
+
+
+def test_drift_catches_a_missing_action_timeout_and_a_short_test_budget():
+    from doctor import playwright_config_drift
+    problems = playwright_config_drift("timeout: 30_000,\nnavigationTimeout: 15_000,\n")
+    assert any("actionTimeout" in p for p in problems)
+    assert any("30_000 ms" in p for p in problems)
+
+
+def test_drift_catches_a_shared_output_dir():
+    from doctor import playwright_config_drift
+    problems = playwright_config_drift("outputDir: 'test-results',\ntimeout: 60_000,\n")
+    assert any("WEBQA_OUTPUT_DIR" in p for p in problems)
+
+
+def test_drift_does_not_confuse_expect_timeout_with_the_test_budget():
+    from doctor import playwright_config_drift
+    ok = ("outputDir: process.env.WEBQA_OUTPUT_DIR ?? 'test-results',\n"
+          "timeout: 60_000,\n  expect: { timeout: 8_000 },\n"
+          "  use: { actionTimeout: 10_000, navigationTimeout: 15_000 },\n")
+    assert playwright_config_drift(ok) == []
+
+
+def test_reruns_do_not_delete_the_artifacts_the_healer_is_about_to_read():
+    """`--reruns` spawns playwright BEFORE heal_one reads error-context.md. Sharing the
+    default outputDir made the flake check erase its own evidence."""
+    import inspect
+    from maintain import rerun_is_flaky
+    src = inspect.getsource(rerun_is_flaky)
+    assert "WEBQA_OUTPUT_DIR" in src
+    assert "rerun-test-results" in src

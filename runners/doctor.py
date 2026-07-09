@@ -29,6 +29,45 @@ def check(results: list[dict], name: str, status: str, detail: str = "", hint: s
     results.append({"name": name, "status": status, "detail": detail, "hint": hint})
 
 
+MIN_TEST_TIMEOUT_MS = 45_000
+
+
+def playwright_config_drift(text: str) -> list[str]:
+    """Invariants a project's playwright.config.ts must hold, and which the template does.
+
+    The template is copied ONCE, at project setup, and never again. Every fix landed in it
+    since then is absent from every existing project, silently. Each of these was a real
+    failure mode before it was an invariant."""
+    import re
+    problems: list[str] = []
+    # Comments explain these invariants; they must not be mistaken for declaring them.
+    code = re.sub(r"/\*.*?\*/", "", re.sub(r"//[^\n]*", "", text), flags=re.S)
+    if "actionTimeout" not in text:
+        problems.append("no `actionTimeout`: a locator that never matches hangs until the "
+                        "test timeout and reports no locator name")
+    if "navigationTimeout" not in text:
+        problems.append("no `navigationTimeout`: a hung goto burns the whole test budget")
+    # Playwright deletes outputDir when it starts. One shared dir = every run destroys the
+    # previous run's screenshots, traces and error-context page snapshots.
+    if "WEBQA_OUTPUT_DIR" not in code:
+        problems.append("`outputDir` is not driven by WEBQA_OUTPUT_DIR: every run deletes the "
+                        "previous run's failure artifacts, and maintain heals from the wrong run")
+    # A device descriptor carries its own viewport (Desktop Chrome → 1280x720) and silently
+    # overrides a top-level `use.viewport`, because `projects[].use` wins. A top-level
+    # viewport declared alongside ANY device spread therefore never applies — the specs run
+    # at a size nobody chose. (A `mobile` project spreading a phone descriptor and keeping
+    # that phone's viewport is correct and must not be flagged.)
+    top = code.split("projects:", 1)[0]
+    if "devices[" in code and re.search(r"\bviewport\s*:", top):
+        problems.append("`use.viewport` is shadowed by the device descriptor in `projects` — "
+                        "declare viewport inside `projects[].use`, after the spread")
+    m = re.search(r"^\s*timeout:\s*(?:Number\([^)]*\?\?\s*)?([0-9_]+)", code, re.MULTILINE)
+    if m and int(m.group(1).replace("_", "")) < MIN_TEST_TIMEOUT_MS:
+        problems.append(f"test `timeout` is {m.group(1)} ms: a legitimately slow step (upload, "
+                        f"async parse) is killed from the outside with a message naming nothing")
+    return problems
+
+
 # ---------- environment ----------
 
 def check_environment(results: list[dict]) -> None:
@@ -183,8 +222,18 @@ def check_project(results: list[dict], alias: str) -> None:
     for r in proj.get("roles") or []:
         name = r.get("name", "?")
         try:
-            api_login(backend or target, r.get("email", ""), r.get("password", ""), proj)
-            check(results, f"role: {name}", OK, r.get("email", ""))
+            _, me, _ = api_login(backend or target, r.get("email", ""), r.get("password", ""), proj)
+            actual = me.get("role")
+            if actual is None:
+                # A 2xx from /auth/login proves the password, never the privileges. RBAC test
+                # cases run under this account and their whole verdict rests on its role.
+                check(results, f"role: {name}", WARN, f"{r.get('email','')} — login OK, role not readable",
+                      "set `auth_me_path` in .web-qa/config.json so the role can be verified")
+            elif str(actual).lower() != name.lower():
+                check(results, f"role: {name}", FAIL, f"{r.get('email','')} actually has role {actual!r}",
+                      "RBAC test cases under this role would assert against the wrong privileges")
+            else:
+                check(results, f"role: {name}", OK, f"{r.get('email','')} → {actual}")
         except Exception as e:
             check(results, f"role: {name}", FAIL, f"{type(e).__name__}: {str(e)[:80]}",
                   "fix this role's credentials in projects.json")
@@ -203,15 +252,12 @@ def check_project(results: list[dict], alias: str) -> None:
     pw_config = webqa / "playwright.config.ts"
     if pw_config.is_file() and (webqa / "node_modules" / "@playwright" / "test").is_dir():
         check(results, "specs runner", OK, "playwright.config.ts + @playwright/test present")
-        # A config without actionTimeout turns every unmatched locator into a bare
-        # "Test timeout of 30000ms exceeded." — no locator, no step. Diagnostics vanish
-        # exactly where they are needed most: form fills in mutating specs.
-        if "actionTimeout" in pw_config.read_text(encoding="utf-8"):
-            check(results, "actionTimeout", OK, "set — locator misses name the locator")
+        drift = playwright_config_drift(pw_config.read_text(encoding="utf-8"))
+        if drift:
+            check(results, "playwright.config.ts", WARN, f"{len(drift)} problem(s): " + "; ".join(drift),
+                  f"re-copy {SKILL / 'playwright.config.template.ts'} and re-apply your baseURL")
         else:
-            check(results, "actionTimeout", WARN, "not set in playwright.config.ts",
-                  "add `actionTimeout: 10_000` under `use:` — otherwise a missing locator "
-                  "hangs until the test timeout and reports nothing (see the template)")
+            check(results, "playwright.config.ts", OK, "matches the template's invariants")
     else:
         check(results, "specs runner", WARN, "not set up",
           "see SKILL.md 'Per-project specs runner setup' (needed for specs/matrix specs stage)")
