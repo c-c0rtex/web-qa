@@ -6,6 +6,38 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.4.7 (a covered route is not a tested route)
+
+Everything here was found by generating one spec with the v0.4.6 prompt and running it
+against a real app. It failed three times, each time for a different reason, and none of
+them was the application's fault.
+
+- **Control-level coverage.** Route coverage is a weak proxy: a page with a kanban, a
+  board/tree toggle, a "generate packing" action and an XLSX export counts as covered the
+  moment one test case navigates to it — even if that test case only reads a table. Now that
+  the map holds whole ARIA snapshots, `coverage.py` lists, per route, the buttons/tabs/
+  comboboxes no test case names. Layout chrome (a name on more than half the routes) and
+  data-derived names (six or more consecutive digits) are filtered out. Reported by
+  `web-qa-generate` as `CONTROL GAP`, in `matrix.md` and `matrix.json`; `--cover-gaps` now
+  targets untouched mechanics too, instead of refusing to run when every route is visited
+- **The three ways a spec goes red against a correct app**, each observed live:
+  `innerText()` returns CSS-*rendered* text, so a locator matched with `/Name/i` and a
+  following case-sensitive regex over `innerText()` disagree whenever `text-transform` is in
+  play; `page.url()` is percent-encoded (`a,b` → `a%2Cb`) and the app appends its own params
+  after navigation, so a query string can never be asserted with `toContain`; and UI numbers
+  group thousands with non-breaking spaces and may use a decimal comma, so `parseInt` on raw
+  text is wrong. Both the generator's and the healer's prompts now say so
+- **Query parameters reach the map.** Only the request *body* was ever mined from OpenAPI, so
+  a spec needing a filtered list invented a query and the API answered 422
+- **`max_usd` in `.web-qa/config.json`.** The ceiling is declared once per project instead of
+  being typed onto the command line of every full regeneration. Precedence: `--max-usd` →
+  `WEBQA_MAX_USD` → project config → `$5.00`
+
+The same probe confirmed the v0.4.5 work end to end: the regenerated spec used the drill-down
+oracle (click the tile, count the rows it filters to), unwrapped the paginated envelope the
+map declares, sent `Authorization: Bearer` on every API call, opened the page before computing
+its oracle — and its screenshot on failure was a rendered page, not `about:blank`.
+
 ## Shipped — v0.4.6 (the map was truncated before anyone could see it)
 
 v0.4.5 removed the cap that rationed ARIA snapshots across routes, and the map got no

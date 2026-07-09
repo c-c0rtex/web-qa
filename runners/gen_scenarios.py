@@ -20,10 +20,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from coverage import control_coverage, control_gap_section
 from explore import load_project
 from matrix import routes_from_context
 from run_scenarios import classify, declared_type, split_tcs, tc_routes
-from spec_gen import call_claude, llm_spend, load_app_context, slugify
+from spec_gen import apply_project_budget, call_claude, llm_spend, load_app_context, slugify
 
 # Deciding WHAT to test is judgment work, and it runs exactly once per invocation —
 # unlike spec-gen, which fans a mechanical translation out over every test case. The
@@ -182,6 +183,7 @@ def main() -> int:
     args = ap.parse_args()
 
     proj = load_project(args.alias)
+    apply_project_budget(proj)
     proj_dir = Path(proj["path"])
     webqa = proj_dir / ".web-qa"
     scenarios_dir = webqa / "scenarios"
@@ -190,14 +192,27 @@ def main() -> int:
     covered, uncovered = route_coverage(webqa)
 
     if args.cover_gaps:
-        if not uncovered:
-            print(json.dumps({"error": "no uncovered routes — nothing to generate",
+        # Two kinds of blind spot: a route nobody visits, and a route everybody visits whose
+        # mechanics nobody exercises. The second one hid a whole kanban behind a single test
+        # case that read a table, and route coverage called it green.
+        gaps = control_coverage(webqa)
+        if not uncovered and not gaps:
+            print(json.dumps({"error": "no uncovered routes and no untouched controls",
                               "covered": covered}), file=sys.stderr)
             return 1
-        args.task = ("Cover the application routes that currently have no test case at all: "
-                     + ", ".join(uncovered))
-        print(f"[generate] --cover-gaps targeting {len(uncovered)} route(s): "
-              f"{', '.join(uncovered)}", file=sys.stderr)
+        wants = []
+        if uncovered:
+            wants.append("the application routes that currently have no test case at all: "
+                         + ", ".join(uncovered))
+        if gaps:
+            worst = sorted(gaps.items(), key=lambda kv: -len(kv[1]))[:4]
+            wants.append("the interactive controls that no test case names, listed per route "
+                         "under UNTOUCHED CONTROLS below — start with "
+                         + ", ".join(f"{r} ({len(n)})" for r, n in worst))
+        args.task = "Cover " + "; and ".join(wants)
+        print(f"[generate] --cover-gaps targeting {len(uncovered)} route(s) and "
+              f"{sum(len(n) for n in gaps.values())} control(s) on {len(gaps)} route(s)",
+              file=sys.stderr)
 
     if args.diff:
         source_section = git_diff_summary(proj_dir, args.diff)
@@ -220,8 +235,12 @@ def main() -> int:
     # No ARIA: this prompt writes prose test cases, not locators. Whole-page snapshots would
     # eat the budget and head-truncate `Backend endpoints` and `Enum values` — the very
     # sections the CORRECTNESS rule tells it to cite.
+    # Route coverage is a weak proxy: one TC that reads a table marks a route with a kanban,
+    # a board/tree toggle and an XLSX export as covered. Name the untouched mechanics too.
+    control_gaps = control_coverage(webqa)
     prompt = PROMPT.format(app_context=load_app_context(proj_dir, include_aria=False),
-                           coverage_section=coverage_prompt_section(covered, uncovered),
+                           coverage_section=coverage_prompt_section(covered, uncovered)
+                                            + control_gap_section(control_gaps),
                            roles_section=roles_section,
                            source_section=source_section, prefix=args.prefix,
                            language=proj.get("language") or "English")
@@ -261,6 +280,15 @@ def main() -> int:
         print(f"[generate] COVERAGE GAP — no test case touches: {', '.join(still_uncovered)}"
               f"\n[generate] run `web-qa-generate --alias {args.alias} --cover-gaps` to close them",
               file=sys.stderr)
+
+    still_gaps = control_coverage(webqa)
+    if still_gaps:
+        summary["uncovered_controls"] = still_gaps
+        worst = sorted(still_gaps.items(), key=lambda kv: -len(kv[1]))[:3]
+        detail = "; ".join(f"`{r}` ({len(n)})" for r, n in worst)
+        total = sum(len(n) for n in still_gaps.values())
+        print(f"[generate] CONTROL GAP — {total} control(s) on {len(still_gaps)} route(s) are "
+              f"named by no test case; worst: {detail}", file=sys.stderr)
 
     summary["llm"] = llm_spend()
     print(json.dumps(summary, ensure_ascii=False))

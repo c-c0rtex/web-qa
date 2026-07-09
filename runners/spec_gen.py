@@ -168,6 +168,20 @@ AUTH RULE (the single most common way these specs die):
   `Bearer ${{token}}` }} }})`. `page.request.get(API_URL)` without that header is a 401
 - The only legitimate use of `page.request` against {backend_url} is the login POST itself
 
+READING TEXT, URLS AND NUMBERS BACK OUT (how a correct spec still goes red):
+- Names in the APP MAP come from the DOM. `innerText()` returns RENDERED text, and CSS
+  `text-transform` upper- or lower-cases it. So a locator found with `/Name/i` and a following
+  `innerText().match(/Name (\\d+)/)` disagree. Prefer `textContent()`, and when a regex must run
+  over visible text, give it the `i` flag
+- Never `parseInt` raw UI text. Thousands are grouped with spaces or non-breaking spaces and
+  the decimal mark may be a comma. Extract with `/[\\d\\u00a0\\u202f .,]+/`, strip the separators,
+  then `Number(...)`
+- `page.url()` is PERCENT-ENCODED (`a,b` → `a%2Cb`), and apps append their own params after
+  navigation (`&loaded=10`, via replaceState). NEVER assert a query string with `toContain`, and
+  never `toHaveURL` a literal that carries one. Parse it:
+      const q = new URL(page.url()).searchParams;
+      expect(q.get('status')!.split(',').sort()).toEqual(['a', 'b'].sort());
+
 TIMING BUDGET (the test has {test_timeout_ms} ms in total):
 - Every explicit `timeout:` you write must be well under {test_timeout_ms} ms. A
   `waitFor({{ timeout: 60000 }})` inside a 30 s test cannot ever fire: playwright kills the
@@ -340,6 +354,24 @@ def llm_budget_usd() -> float:
         return float(os.environ.get("WEBQA_MAX_USD", DEFAULT_MAX_USD))
     except ValueError:
         return DEFAULT_MAX_USD
+
+
+def apply_project_budget(proj: dict) -> None:
+    """Let a project declare its ceiling once, in `.web-qa/config.json` → `max_usd`.
+
+    Precedence stays CLI > env > project > DEFAULT_MAX_USD: a flag or an env var passed for
+    THIS run always wins. Without this, the $5 default forced `--max-usd` onto the command
+    line of every full regeneration, which is exactly the sort of number that gets typed from
+    memory and wrong."""
+    if "WEBQA_MAX_USD" in os.environ:
+        return
+    v = proj.get("max_usd")
+    if v is None:
+        return
+    try:
+        os.environ["WEBQA_MAX_USD"] = str(float(v))
+    except (TypeError, ValueError):
+        print(f"[gen] ignoring non-numeric `max_usd` in config.json: {v!r}", file=sys.stderr)
 
 
 def llm_spend() -> dict:
@@ -735,6 +767,7 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
 def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
               force: bool = False, workers: int = 1, live_probe: bool = True) -> dict:
     proj = load_project(alias)
+    apply_project_budget(proj)
     proj_dir = Path(proj["path"])
     webqa = proj_dir / ".web-qa"
     scenarios_dir = webqa / "scenarios"
@@ -903,8 +936,9 @@ def main() -> int:
                     help="parallel claude calls (default 1). Concurrent calls all miss the "
                          "shared prompt cache — each extra worker buys wall-clock with money")
     ap.add_argument("--max-usd", type=float, default=None,
-                    help=f"hard LLM spend ceiling for this run (default {DEFAULT_MAX_USD:.2f}, "
-                         f"0 = no guard). Also settable via WEBQA_MAX_USD")
+                    help=f"hard LLM spend ceiling for this run (0 = no guard). Optional: falls back to\n"
+                         f"WEBQA_MAX_USD, then `max_usd` in .web-qa/config.json, then "
+                         f"${DEFAULT_MAX_USD:.2f}")
     ap.add_argument("--no-probe", action="store_true",
                     help="skip the live locator check against the running app")
     args = ap.parse_args()

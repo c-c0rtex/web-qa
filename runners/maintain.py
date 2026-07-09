@@ -29,7 +29,8 @@ from pathlib import Path
 
 from explore import load_project, viewport_env
 from run_scenarios import norm_route
-from spec_gen import (DEFAULT_MAX_USD, call_claude, llm_spend, load_app_context, load_seed,
+from spec_gen import (DEFAULT_MAX_USD, apply_project_budget, call_claude, llm_spend,
+                      load_app_context, load_seed,
                       postprocess_spec, seed_prompt_section, validate_spec)
 
 # `await page.goto(`${APP}/orders/${id}`)` → /orders/${id}; also plain '/orders'
@@ -101,6 +102,13 @@ Rules for case (a):
 - NEVER "fix" a spec by rerouting a UI step through `page.request` — the UI path IS the test;
   fix the selector/timing instead. API calls stay setup/teardown/verification only
 - If an element genuinely does not exist anymore, replace the step with the closest real equivalent and add a `// MAINT:` comment explaining the change
+- Three ways a spec goes red against a CORRECT app — check for these before anything else:
+  (1) `innerText()` returns CSS-RENDERED text and `text-transform` changes its case, so a
+  case-sensitive regex over it fails while the locator that found the element succeeded — use
+  `textContent()` or add the `i` flag; (2) `page.url()` is percent-encoded (`a,b` → `a%2Cb`) and
+  apps append their own params (`&loaded=10`), so parse `new URL(...).searchParams` instead of
+  `toContain`-ing a query string; (3) UI numbers group thousands with (non-breaking) spaces and
+  may use a decimal comma, so strip separators before `Number(...)`
 
 Output the corrected .spec.ts now:
 """
@@ -390,8 +398,9 @@ def main() -> int:
                     help="parallel claude calls (default 1). Concurrent calls all miss the "
                          "shared prompt cache — each extra worker buys wall-clock with money")
     ap.add_argument("--max-usd", type=float, default=None,
-                    help=f"hard LLM spend ceiling for this run (default {DEFAULT_MAX_USD:.2f}, "
-                         f"0 = no guard). Also settable via WEBQA_MAX_USD")
+                    help=f"hard LLM spend ceiling for this run (0 = no guard). Optional: falls back to\n"
+                         f"WEBQA_MAX_USD, then `max_usd` in .web-qa/config.json, then "
+                         f"${DEFAULT_MAX_USD:.2f}")
     ap.add_argument("--pw-workers", type=int, help="playwright --workers for the test run")
     ap.add_argument("--with-screens", action="store_true",
                     help="list failure screenshot paths in the summary JSON so the "
@@ -408,6 +417,7 @@ def main() -> int:
         os.environ["WEBQA_MAX_USD"] = str(args.max_usd)
 
     proj = load_project(args.alias)
+    apply_project_budget(proj)
     proj_dir = Path(proj["path"])
     webqa = proj_dir / ".web-qa"
     specs_dir = webqa / "specs"

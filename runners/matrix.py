@@ -34,6 +34,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from coverage import control_coverage
 from explore import load_project, run_fixture_cmd, viewport_entry, viewport_env
 from run_scenarios import split_tcs, extract_paths, classify, tc_roles, DEFAULT_BACKEND_PREFIXES
 
@@ -430,7 +431,9 @@ GATE_BLOCKING = ("fail", "error")
 def render_matrix_md(alias: str, run_id: str, rows: list[dict], stats: dict, gate_ok: bool,
                      coverage: dict, flaky_keys: set[str],
                      role_coverage: dict | None = None,
-                     quarantined: set[str] = frozenset()) -> str:
+                     quarantined: set[str] = frozenset(),
+                     control_gaps: dict[str, list[str]] | None = None) -> str:
+    control_gaps = control_gaps or {}
     lines = [
         f"# Test Matrix — {alias}",
         f"\n_Run: {run_id} UTC_",
@@ -450,6 +453,14 @@ def render_matrix_md(alias: str, run_id: str, rows: list[dict], stats: dict, gat
         lines.append(f"\n**Route coverage:** {coverage['covered']}/{coverage['routes_total']} routes have tests")
         if coverage["uncovered"]:
             lines.append("Uncovered: " + ", ".join(f"`{r}`" for r in coverage["uncovered"]))
+    if control_gaps:
+        total = sum(len(n) for n in control_gaps.values())
+        lines.append(f"\n**Untouched controls:** {total} on {len(control_gaps)} route(s) "
+                     f"— no test case names them")
+        for route, names in sorted(control_gaps.items(), key=lambda kv: -len(kv[1]))[:5]:
+            shown = ", ".join(f"«{n}»" for n in names[:6])
+            more = f" +{len(names) - 6}" if len(names) > 6 else ""
+            lines.append(f"- `{route}` ({len(names)}): {shown}{more}")
     for role, rc in (role_coverage or {}).items():
         line = f"- role `{role}`: {rc['covered']}/{rc['total']}"
         if rc["uncovered"]:
@@ -546,11 +557,14 @@ def main() -> int:
 
     coverage = compute_coverage(webqa, scenario_rows, spec_rows)
     role_coverage = coverage_by_role(webqa, scenario_rows)
+    # A route with one test case that only reads a table is not a tested route.
+    control_gaps = control_coverage(webqa)
 
     if args.list:
         print(json.dumps({"total": len(rows), "scenario_tcs": len(scenario_rows),
                           "specs": len(spec_rows), "gate_excluded": gate_excluded,
                           "coverage": coverage, "role_coverage": role_coverage,
+                          "uncovered_controls": control_gaps,
                           "rows": rows}, ensure_ascii=False, indent=2))
         return 0
 
@@ -589,12 +603,14 @@ def main() -> int:
         gate_ok = not any(r["status"] in GATE_BLOCKING and row_key(r) not in quarantined
                           for r in rows)
         matrix_md.write_text(render_matrix_md(proj["alias"], run_id, rows, stats, gate_ok,
-                                              coverage, flaky_keys, role_coverage, quarantined))
+                                              coverage, flaky_keys, role_coverage, quarantined,
+                                              control_gaps))
         (matrix_dir / "matrix.json").write_text(json.dumps({
             "run_id": run_id, "alias": proj["alias"], "stage": stage, "gate_ok": gate_ok,
             "invocation": invocation, "artifacts": artifacts,
             "mutating_specs_run": 0 if args.no_mutations or args.skip_specs else mutating_specs,
             "stats": stats, "coverage": coverage, "role_coverage": role_coverage,
+            "uncovered_controls": control_gaps,
             "flaky": sorted(flaky_keys), "quarantined": sorted(quarantined),
             "gate_excluded": gate_excluded,
             "roles": [r or "default" for r in roles],

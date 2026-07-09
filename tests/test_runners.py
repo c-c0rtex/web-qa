@@ -1830,3 +1830,172 @@ def test_slice_openapi_never_drops_the_enum_block():
     assert "/ghost" not in out
     assert "showing 1 of 2 endpoint groups" in out       # the enum block is not a group
     assert "## Auth Flow" in out
+
+
+# ---------------------------------------------------------------------------
+# The ceiling should be declared once, not typed from memory on every run.
+# ---------------------------------------------------------------------------
+
+def test_project_can_declare_its_own_ceiling(monkeypatch):
+    from spec_gen import DEFAULT_MAX_USD, apply_project_budget, llm_budget_usd
+    monkeypatch.delenv("WEBQA_MAX_USD", raising=False)
+    assert llm_budget_usd() == DEFAULT_MAX_USD
+    apply_project_budget({"max_usd": 25})
+    assert llm_budget_usd() == 25.0
+
+
+def test_a_flag_or_env_for_this_run_outranks_the_project_default(monkeypatch):
+    from spec_gen import apply_project_budget, llm_budget_usd
+    monkeypatch.setenv("WEBQA_MAX_USD", "3")          # set by --max-usd, or by the user
+    apply_project_budget({"max_usd": 25})
+    assert llm_budget_usd() == 3.0
+
+
+def test_project_budget_of_zero_disables_the_guard(monkeypatch):
+    from spec_gen import apply_project_budget, llm_budget_usd
+    monkeypatch.delenv("WEBQA_MAX_USD", raising=False)
+    apply_project_budget({"max_usd": 0})
+    assert llm_budget_usd() == 0.0                    # <= 0 means no guard
+
+
+def test_a_nonsense_project_budget_falls_back_instead_of_crashing(monkeypatch, capsys):
+    from spec_gen import DEFAULT_MAX_USD, apply_project_budget, llm_budget_usd
+    monkeypatch.delenv("WEBQA_MAX_USD", raising=False)
+    apply_project_budget({"max_usd": "lots"})
+    assert llm_budget_usd() == DEFAULT_MAX_USD
+    assert "non-numeric" in capsys.readouterr().err
+
+
+def test_every_llm_runner_applies_the_project_budget():
+    import inspect
+
+    import gen_scenarios
+    import maintain
+    import spec_gen
+    for mod in (gen_scenarios, maintain, spec_gen):
+        assert "apply_project_budget(proj)" in inspect.getsource(mod), mod.__name__
+
+
+def test_op_params_states_the_query_contract_a_spec_would_otherwise_invent():
+    """A GET's query contract lived nowhere in the map, so a spec that needed a filtered
+    list guessed one and the API answered 422."""
+    from explore import op_params
+    op = {"parameters": [
+        {"name": "q", "in": "query", "schema": {"type": "string"}},
+        {"name": "size", "in": "query", "schema": {"type": "integer"}},
+        {"name": "order_id", "in": "path", "required": True, "schema": {"type": "integer"}},
+        {"name": "authorization", "in": "header"},
+        {"name": "year", "in": "query", "required": True, "schema": {}},
+    ]}
+    out = op_params({}, op)
+    assert out == "query: q:string, size:integer, year*:any"       # path + header excluded
+    assert op_params({}, {"parameters": []}) == ""
+    assert op_params({}, {}) == ""
+
+
+def test_context_md_prints_the_query_contract():
+    from explore import render_context_md
+    oa = {"paths": {"/orders": {"get": {
+        "parameters": [{"name": "page", "in": "query", "schema": {"type": "integer"}}],
+        "responses": {"200": {}}}}}}
+    md = render_context_md({"alias": "t", "target_url": "http://x"}, [], oa, {})
+    assert "GET query: page:integer" in md
+
+
+def test_prompts_warn_about_the_three_ways_a_correct_app_still_goes_red():
+    """Found by running a generated spec against the real app: the locator matched with /i,
+    then `innerText()` returned CSS-uppercased text and the next regex missed; `page.url()`
+    came back percent-encoded with an app-appended `&loaded=10`; and money is grouped with
+    non-breaking spaces."""
+    from maintain import FIX_PROMPT
+    from spec_gen import PROMPT_TEMPLATE
+    p = PROMPT_TEMPLATE.format(
+        stack="next", frontend_url="http://f", backend_url="http://b", login_email="e@x",
+        login_password="pw", test_timeout_ms=60000, seed_section="", app_context="MAP",
+        dnd_section="", test_data_prefix="QA-", auth_login_hint="hint", tc_body="TC")
+    for text in (p, FIX_PROMPT):
+        assert "text-transform" in text
+        assert "percent-encoded" in text.lower() or "PERCENT-ENCODED" in text
+        assert "searchParams" in text
+        assert "non-breaking" in text
+    assert "toContain" in p          # named as the thing not to do with a query string
+
+
+# ---------------------------------------------------------------------------
+# Route coverage called a kanban "covered" because one test case read its table.
+# ---------------------------------------------------------------------------
+
+def _map_with(routes: dict) -> str:
+    parts = ["# m\n\n## Routes\n\n## ARIA snapshots\n"]
+    for route, yaml in routes.items():
+        parts.append(f"### `{route}`\n```yaml\n{yaml}\n```\n")
+    parts.append("\n## Backend endpoints\n- x\n")
+    return "\n".join(parts)
+
+
+SIDEBAR = '- link "Dashboard"\n- button "Switch theme"\n- button "User menu"'
+
+
+def test_controls_by_route_reads_actionable_roles_only():
+    from coverage import controls_by_route
+    md = _map_with({"/a": '- button "Save"\n- tab "Board"\n- link "Orders"\n- combobox "Filter"'})
+    assert controls_by_route(md) == {"/a": {"save", "board", "filter"}}   # link is navigation
+
+
+def test_controls_ignores_names_that_are_really_data():
+    from coverage import controls_by_route
+    md = _map_with({"/a": '- button "QA-Model-A-1783591806608 ACME LTD"\n- button "Pack"'})
+    assert controls_by_route(md) == {"/a": {"pack"}}
+
+
+def test_layout_chrome_is_whatever_sits_on_most_routes():
+    from coverage import layout_chrome
+    by = {f"/r{i}": {"switch theme", f"unique{i}"} for i in range(4)}
+    assert layout_chrome(by) == {"switch theme"}
+    assert layout_chrome({"/a": {"x"}}) == set()          # too few routes to judge
+
+
+def test_element_coverage_finds_the_kanban_behind_a_covered_route():
+    """The route is visited by a test case, so route_coverage calls it green. The test case
+    only reads a table; the board toggle, the pallet and the export are never named."""
+    from coverage import element_coverage
+    md = _map_with({
+        "/packing": SIDEBAR + '\n- button "Kanban"\n- button "Tree"\n- button "Pallet"\n- button "Export XLSX"',
+        "/orders": SIDEBAR + '\n- button "Export XLSX"',
+        "/help": SIDEBAR + '\n- button "Print"',
+    })
+    tcs = ["**Steps:**\n1. Open `/packing`.\n2. Compare rows with GET `/orders`.\n"
+           "3. Click Export XLSX.\n"]
+    gaps = element_coverage(md, tcs)
+    assert gaps["/packing"] == ["kanban", "pallet", "tree"]     # export is mentioned
+    assert "/orders" not in gaps                                # its only control is mentioned
+    assert gaps["/help"] == ["print"]
+    assert "switch theme" not in sum(gaps.values(), [])         # chrome filtered out
+
+
+def test_element_coverage_is_empty_without_a_map():
+    from coverage import element_coverage
+    assert element_coverage("", ["**Steps:** 1. x"]) == {}
+
+
+def test_control_gap_section_ranks_the_worst_route_first():
+    from coverage import control_gap_section
+    s = control_gap_section({"/a": ["one"], "/packing": ["kanban", "tree", "pallet"]})
+    assert s.index("/packing") < s.index("/a")
+    assert "«kanban»" in s
+    assert control_gap_section({}) == ""
+
+
+def test_cover_gaps_no_longer_bails_when_only_controls_are_missing():
+    import inspect
+    import gen_scenarios
+    src = inspect.getsource(gen_scenarios.main)
+    assert "not uncovered and not gaps" in src
+
+
+def test_matrix_reports_untouched_controls():
+    from matrix import render_matrix_md
+    md = render_matrix_md("a", "R1", [], {}, True, {"routes_total": 1, "covered": 1, "uncovered": []},
+                          set(), None, frozenset(), {"/packing": ["kanban", "tree"]})
+    assert "Untouched controls:** 2 on 1 route(s)" in md
+    assert "«kanban»" in md

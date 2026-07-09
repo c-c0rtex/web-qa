@@ -686,6 +686,23 @@ def schema_brief(openapi: dict, schema: dict) -> str:
     return t or "object"
 
 
+def op_params(openapi: dict, op: dict, limit: int = 16) -> str:
+    """`query: page:integer, size:integer, q:string` — the filters an endpoint actually accepts.
+
+    Only the request BODY was ever mined. A GET's query contract lived nowhere, so a spec that
+    needed a filtered list invented one and the API answered 422. Path params are in the URL
+    template already; headers are auth's business."""
+    out = []
+    for prm in op.get("parameters") or []:
+        if not isinstance(prm, dict) or prm.get("in") != "query":
+            continue
+        schema = deref(openapi, prm.get("schema") or {})
+        t = schema.get("type") or "any"
+        star = "*" if prm.get("required") else ""
+        out.append(f"{prm['name']}{star}:{t}")
+    return "query: " + ", ".join(out[:limit]) if out else ""
+
+
 def op_responses(openapi: dict, op: dict) -> str:
     """`200: array of {…}` plus the other declared status codes.
 
@@ -830,6 +847,9 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
                     fields = schema_fields(openapi, body_schema)
                     if fields:
                         entry.append(f"  - {m.upper()} body: {fields}")
+                params = op_params(openapi, op)
+                if params:
+                    entry.append(f"  - {m.upper()} {params}")
                 resp = op_responses(openapi, op)
                 if resp:
                     entry.append(f"  - {m.upper()} → {resp}")

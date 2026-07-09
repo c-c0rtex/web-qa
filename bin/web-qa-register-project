@@ -50,6 +50,7 @@ CONFIG_SKELETON = {
     "language": None,
     "frontend_dir": None,
     "workers": None,
+    "max_usd": None,
     "backend_prefixes": None,
     "route_hints": None,
     "id_discovery": None,
