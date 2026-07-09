@@ -6,6 +6,14 @@ feedback are welcome and will shape what moves up.
 
 _Last updated: 2026-07_
 
+## Shipped — v0.4.4 (examples belong to nobody)
+
+Docs, prompt examples and tests quoted routes, button captions, KPI names and enum labels
+taken verbatim from the closed codebase web-qa was being debugged against. None of it was
+needed to explain a change to this tool. Findings are now stated as properties of web-qa,
+every example is a neutral placeholder, and the history was rewritten to match. No
+behaviour changed.
+
 ## Shipped — v0.4.3 (the app map stops lying, and says so when it fails)
 
 Every spec that filled a form hung for 30 seconds and reported only `Test timeout of 30000ms

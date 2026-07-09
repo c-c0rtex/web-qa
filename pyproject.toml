@@ -1,6 +1,6 @@
 [project]
 name = "web-qa"
-version = "0.4.3"
+version = "0.4.4"
 description = "Autonomous web-app QA skill for Claude Code: Playwright E2E, visual regression, axe-core a11y, LLM-generated self-healing specs"
 readme = "README.md"
 requires-python = ">=3.11"
