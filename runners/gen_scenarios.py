@@ -95,8 +95,8 @@ RULES:
 - CORRECTNESS, not presence. Any TC whose page displays data the app DERIVED (a KPI, a total,
   a count, a ranking, a currency sum) MUST have at least one Expected bullet asserting that
   the displayed value is RIGHT, and naming where that truth comes from. "KPI tiles show
-  numbers" is worthless — a broken aggregate happily shows `0`. Write instead: "«Unpaid to
-  factory» equals the number of invoices with status unpaid, per GET `/invoices`"
+  numbers" is worthless — a broken aggregate happily shows `0`. Write instead: "the «Overdue»
+  tile equals the number of invoices whose status is overdue, per GET `/invoices`"
 - The truth must come from the PRIMARY collections, never from the same aggregate/summary
   endpoint the page itself calls — if that endpoint's aggregation is broken, the check passes
   on a broken feature. If no independent source exists, say so in the bullet and assert an

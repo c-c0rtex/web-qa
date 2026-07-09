@@ -494,9 +494,9 @@ def tc_api_groups(body: str, backend_prefixes: tuple[str, ...]) -> set[str]:
 
 
 def slice_openapi(md: str, groups: set[str]) -> str:
-    """Keep only the endpoint groups this TC can plausibly call. The section is 15 KB of the
-    map and identical for every TC; a spec for `/items` never needed the schemas of
-    `/shipments`, `/payments` and `/fx`."""
+    """Keep only the endpoint groups this TC can plausibly call. The section can be a third
+    of the map and is identical for every TC; a spec for one page never needed the request
+    schemas of every other resource in the API."""
     b = _section_bounds(md, "## Backend endpoints")
     if not b or not groups:
         return md

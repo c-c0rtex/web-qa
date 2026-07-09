@@ -1008,7 +1008,7 @@ ROUTES_MD = """## Routes
 | `/import` | Import |
 """
 
-# Two real the project shapes that a naive extractor gets backwards:
+# Two shapes a naive extractor gets backwards:
 #  * TC-A1 documents its own `GET /admin/users` call — the page is still visited
 #  * TC-A2 mentions `/` only as a redirect target in Expected — it never tests the dashboard
 ADMIN_TC = """# Admin regression
@@ -1035,7 +1035,7 @@ def test_route_coverage_finds_the_untouched_dashboard(tmp_path):
     covered, uncovered = route_coverage(webqa)
     # the page it documents a GET for is covered; the redirect target in Expected is not
     assert covered == ["/orders/{id}", "/admin/users"]
-    assert uncovered == ["/", "/orders", "/import"]   # app-map order; "/" is the the project blind spot
+    assert uncovered == ["/", "/orders", "/import"]   # app-map order; "/" is the classic blind spot
 
 
 def test_tc_routes_ignores_expected_only_mentions():
@@ -1117,14 +1117,14 @@ def test_missing_role_is_not_an_error():
 
 def test_merge_pages_carries_over_unreached_routes():
     from explore import merge_pages
-    prev = [{"path": "/orders", "aria": "table"}, {"path": "/items", "aria": "grid"}]
+    prev = [{"path": "/orders", "aria": "table"}, {"path": "/settings", "aria": "grid"}]
     fresh = [{"path": "/orders", "aria": "table2"}]          # crawl stopped early
     merged, rep = merge_pages(prev, fresh, "2026-07-09")
     paths = {p["path"] for p in merged}
-    assert paths == {"/orders", "/items"}             # nothing silently deleted
-    carried = next(p for p in merged if p["path"] == "/items")
+    assert paths == {"/orders", "/settings"}                 # nothing silently deleted
+    carried = next(p for p in merged if p["path"] == "/settings")
     assert carried["stale_since"] == "2026-07-09"
-    assert rep["carried_over"] == ["/items"]
+    assert rep["carried_over"] == ["/settings"]
     assert next(p for p in merged if p["path"] == "/orders")["aria"] == "table2"  # fresh wins
 
 
@@ -1229,7 +1229,7 @@ def test_slice_aria_keeps_only_the_routes_the_tc_visits():
 def test_slice_aria_parent_route_pulls_in_its_entity_cards():
     from spec_gen import slice_aria
     out = slice_aria(ARIA_MAP, {"/orders"})       # TC only names /orders
-    assert 'Save' in out                     # /orders/23 is a child, still relevant
+    assert 'Save' in out                          # /orders/23 is a child, still relevant
 
 
 def test_slice_aria_noop_without_routes_or_matches():
@@ -1293,9 +1293,9 @@ def test_api_group():
 
 def test_tc_api_groups_includes_named_oracle_endpoints_and_auth():
     from spec_gen import tc_api_groups
-    body = "**Steps:**\n1. Открыть `/`.\n2. Эталон: GET `/invoices`.\n"
+    body = "**Steps:**\n1. Open `/`.\n2. Reference: GET `/invoices`.\n"
     groups = tc_api_groups(body, ())
-    assert "/invoices" in groups   # the independent-oracle collection survives
+    assert "/invoices" in groups           # the independent-oracle collection survives
     assert "/auth" in groups               # every spec logs in
 
 
