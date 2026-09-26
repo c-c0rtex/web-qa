@@ -23,11 +23,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
 from playwright.sync_api import sync_playwright, ConsoleMessage, Response
 
 from progress import Progress, emit
 
+from entity_ids import backend_client, discover_ids, id_routes, materialize_path  # noqa: F401
 from explore import (
     api_login,
     build_storage_state,
@@ -235,57 +235,6 @@ def keyword_to_search_terms(kw: str) -> list[str]:
     return [t for t in terms if t and not (t in seen or seen.add(t))][:6]
 
 
-def materialize_path(path: str, ids: dict) -> str:
-    """Substitute {placeholder} tokens with ids discovered via id_discovery.
-    {order_id}/{order} → ids["order"]; generic {id}/{N} → first discovered id."""
-    if "{" not in path:
-        return path
-
-    def repl(m: re.Match) -> str:
-        token = m.group(1)
-        base = token[:-3] if token.endswith("_id") else token
-        for key in (base, token):
-            if ids.get(key):
-                return str(ids[key])
-        if token in ("id", "N") and ids:
-            return str(next(iter(ids.values())))
-        return m.group(0)
-
-    return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", repl, path)
-
-
-def backend_client(cookies: dict, token: str | None) -> "httpx.Client":
-    """An httpx client that carries whatever the app's login handed back.
-
-    Cookies alone were sent. For a JWT app the login returns a bearer token and sets no
-    session cookie, so every backend probe a test case documents in its Steps answered 401 —
-    and the passive runner reported that as the test case failing. The token was already in
-    a local variable two frames up."""
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return httpx.Client(cookies=cookies, headers=headers, timeout=10)
-
-
-def discover_ids(backend: str, cookies: dict, id_discovery: list[dict],
-                 token: str | None = None) -> dict:
-    """Fetch a sample entity id per config entry
-    (config.json: [{"endpoint": "/orders", "key": "order"}, ...])."""
-    out: dict = {}
-    if not id_discovery:
-        return out
-    with backend_client(cookies, token) as cli:
-        for spec in id_discovery:
-            endpoint, key = spec["endpoint"], spec["key"]
-            try:
-                r = cli.get(f"{backend}{endpoint}")
-                data = r.json()
-                items = data if isinstance(data, list) else data.get("items") or data.get("results") or []
-                if items and isinstance(items[0], dict):
-                    out[key] = items[0].get("id") or items[0].get(f"{key}_id")
-            except Exception:
-                pass
-    return out
-
-
 # --- a11y ---
 
 AXE_JS = (Path(__file__).parent / "axe.min.js").read_text() if (Path(__file__).parent / "axe.min.js").exists() else ""
@@ -407,7 +356,8 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
                    backend_prefixes: tuple[str, ...], route_hints: list[dict],
                    visual_masks: list[str], visual_exclude: list[str], vp_suffix: str = "",
                    update_routes: str | None = None, token: str | None = None,
-                   asserted_by_spec: str | None = None) -> dict:
+                   asserted_by_spec: str | None = None,
+                   entity_routes: dict[str, str] | None = None) -> dict:
     body = tc["body"]
     fronts, backs = extract_paths(body, backend_prefixes)
     expected = expected_keywords(body)
@@ -423,10 +373,19 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
     artifacts: list[str] = []
     a11y_violations: list[dict] = []
     visual_results: list[dict] = []
+    probed = 0
 
     # Frontend
     for path in fronts[:3]:
-        full = target.rstrip("/") + materialize_path(path, ids)
+        materialized = materialize_path(path, ids, entity_routes)
+        if "{" in materialized:
+            # No id for this template (see materialize_path). Opening `/people/{id}` literally
+            # measures a 404 page against the test case's expectations — not the app.
+            notes.append(f"GOTO {path} → skipped: unresolved placeholder "
+                         f"(add an `id_discovery` entry with `route` in .web-qa/config.json)")
+            continue
+        full = target.rstrip("/") + materialized
+        probed += 1
         try:
             page.goto(full, wait_until="domcontentloaded", timeout=18000)
             try:
@@ -518,7 +477,7 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
         for method, path in backs[:5]:
             if method != "GET":
                 continue
-            materialized = materialize_path(path, ids)
+            materialized = materialize_path(path, ids, entity_routes)
             if "{" in materialized:
                 # `id_discovery` is unset or returned nothing, so `/orders/{order_id}` is being
                 # requested literally. A 404 for a URL that was never a URL is not the app
@@ -527,6 +486,7 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
                              f"(set `id_discovery` in .web-qa/config.json)")
                 continue
             full = backend.rstrip("/") + materialized
+            probed += 1
             try:
                 r = cli.request(method, full)
                 notes.append(f"{method} {path} → {r.status_code}")
@@ -536,9 +496,10 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
                 overall = "error"
                 notes.append(f"{method} {path} → exception: {str(e)[:80]}")
 
-    if not fronts and not [b for b in backs if b[0] == "GET"]:
+    if not probed:
+        # Nothing was opened or requested — a "pass" here would certify an unchecked case.
         return {"id": tc["id"], "title": tc["title"], "kind": "passive", "status": "skip",
-                "notes": ["no frontend path or GET backend op extracted (and no inference)"],
+                "notes": notes or ["no frontend path or GET backend op extracted (and no inference)"],
                 "artifacts": artifacts, "a11y_critical": [], "visual": []}
 
     return {"id": tc["id"], "title": tc["title"], "kind": "passive", "status": overall,
@@ -665,7 +626,8 @@ def main() -> int:
                                      baseline_dir, args.update_baseline, args.visual_threshold,
                                      backend_prefixes, route_hints, visual_masks, visual_exclude,
                                      vp_suffix, args.routes, token,
-                                     spec_for_tc(project_path / ".web-qa", tc["id"]))
+                                     spec_for_tc(project_path / ".web-qa", tc["id"]),
+                                     id_routes(id_discovery))
                 # Network assertion: a 5xx during THIS TC's navigation is a failure signal,
                 # not a footnote (config `network_fail_on`, default ["5xx"] — add "4xx" to
                 # tighten). Structural, language-agnostic, same as everywhere else.

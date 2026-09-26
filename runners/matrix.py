@@ -37,7 +37,8 @@ from pathlib import Path
 
 from coverage import control_coverage
 from progress import Progress, emit
-from explore import load_project, run_fixture_cmd, viewport_entry, viewport_env
+from explore import (export_spec_env, load_project, redacted_env, run_fixture_cmd,
+                     viewport_entry, viewport_env)
 from spec_gen import orphan_specs
 from run_scenarios import split_tcs, extract_paths, classify, tc_roles, DEFAULT_BACKEND_PREFIXES
 
@@ -590,6 +591,7 @@ def main() -> int:
     args = ap.parse_args()
 
     proj = load_project(args.alias)
+    export_spec_env(proj)      # stand URLs and logins for the specs — never in their source
     webqa = Path(proj["path"]) / ".web-qa"
     backend_prefixes = tuple(proj.get("backend_prefixes") or DEFAULT_BACKEND_PREFIXES)
 
@@ -684,7 +686,7 @@ def main() -> int:
             "argv": sys.argv,
             "cwd": os.getcwd(),
             "flags": {k: v for k, v in sorted(vars(args).items()) if v not in (None, False)},
-            "env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("WEBQA_")},
+            "env": redacted_env(),      # passwords from export_spec_env must not land in a report
         }
         artifacts: dict = {}
 

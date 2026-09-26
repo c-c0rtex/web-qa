@@ -27,12 +27,12 @@ from datetime import date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from explore import load_project, viewport_env
+from explore import export_spec_env, load_project, viewport_env
 from progress import Progress, emit
 from run_scenarios import norm_route
 from spec_gen import (DEFAULT_MAX_USD, apply_project_budget, call_claude, llm_spend,
                       load_app_context, load_seed, postprocess_spec,
-                      seed_prompt_section, spend_probe, validate_spec)
+                      seed_prompt_section, spend_probe, stand_values_in, validate_spec)
 
 # `await page.goto(`${APP}/orders/${id}`)` → /orders/${id}; also plain '/orders'
 RE_SPEC_GOTO = re.compile(r"""goto\(\s*[`'"]([^`'"]*)""")
@@ -372,6 +372,11 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
         return spec_path.name, None, "empty output from claude", "fix", "", None
 
     kind, detail = classify_heal_output(code)
+    leaks = stand_values_in(code, proj)
+    if leaks:
+        # playwright's error text carries full URLs; a fix that copies one pins the spec to
+        # this stand — and it would be written into the project repo
+        return spec_path.name, None, f"fix hardcodes {', '.join(leaks)} — not written", kind, detail, None
     if kind == "transient":
         # nothing to write — the spec is fine, the environment hiccuped
         return spec_path.name, None, None, kind, detail, None
@@ -429,6 +434,7 @@ def main() -> int:
         os.environ["WEBQA_MAX_USD"] = str(args.max_usd)
 
     proj = load_project(args.alias)
+    export_spec_env(proj)      # reruns and the post-fix check run the specs; they need it too
     apply_project_budget(proj)
     proj_dir = Path(proj["path"])
     webqa = proj_dir / ".web-qa"

@@ -112,12 +112,13 @@ fix when something is missing.
 Shared runners, project specifics in two places:
 
 - **`projects.json`** (machine-local, NEVER inside the skill or the project repo). Resolution: `WEBQA_REGISTRY` env → `~/.config/web-qa/projects.json`. Holds only what is secret or machine-specific: `alias`, `path`, **`auth: {email, password}`**, optional **`roles: [{name, email, password}]`** (named accounts for RBAC runs — `--role manager`, `web-qa-matrix --roles admin,manager`; TCs annotated `**Role:** <name>` run ONLY under that role's combos, unannotated TCs are role-agnostic). Everything else — including `target_url` and `backend_url` — lives in `<project>/.web-qa/config.json` and may be committed. No hardcoded fallbacks: without auth (or `--email/--password`) runners exit with a clear error.
+- **Generated specs never contain the stand.** No host, port, email or password: they navigate relative to `baseURL` and read `WEBQA_BASE_URL`, `WEBQA_BACKEND_URL`, `WEBQA_EMAIL`/`WEBQA_PASSWORD` and `WEBQA_ROLE_<NAME>_EMAIL`/`_PASSWORD`, which matrix / run-specs / maintain export from the registry (a caller's own value wins). spec-gen rejects an output that hardcodes any of them and retries once; `web-qa-doctor` flags old specs that still carry a registry password.
 - **`<project>/.web-qa/config.json`** (in the project repo): merged over the registry entry (`null` values ignored). Keys:
   - `target_url` / `backend_url` — frontend and API base URLs
   - `stack` — string for the spec-gen prompt (e.g. `"Next.js + FastAPI admin"`, default `"web"`)
   - `backend_prefixes` — paths treated as backend-only (never opened as frontend routes). Default: `/auth`, `/api`, `/health`
   - `route_hints` — `[{path, keywords}]` to infer the route from TC text when no explicit path. Default: empty
-  - `id_discovery` — `[{endpoint, key}]`: which GET endpoint to sample a live id from, substituted into `{key}`/`{key_id}`/`{id}` placeholders. Default: empty
+  - `id_discovery` — `[{endpoint, key, route?}]`: which GET endpoint to sample a live id from. A placeholder gets the id its route names: `{key}`/`{key_id}` by token, a generic `{id}` by the segment in front of it (`/shipments/{id}` → `shipment`), or by an explicit `route` where the URL word is not the API's (`{"endpoint": "/directory/contacts", "key": "contact", "route": "/people/{id}"}`). No match → the probe is skipped, never filled with another entity's id. `web-qa-explore` uses it too, to open templated routes no page links to. Default: empty
   - `auth_flow_notes` — lines for the Auth Flow section of `app.context.md` (otherwise derived from OpenAPI)
   - `auth_login_hint` — exact auth flow description for the spec-gen prompt (JWT vs cookie, browser vs Node-side API). Critical: without it the model guesses the contract. Default: generic hint
   - `auth_login_path` / `auth_login_body` / `auth_token_field` / `auth_me_path` / `auth_browser_storage` — declarative auth adapter for the RUNNERS (explore/run/doctor login): endpoint path (default `/auth/login`), JSON body template with `{email}`/`{password}` (default flat), dot-path to a bearer token in the response (e.g. `"user.token"`), the identity endpoint used to learn WHO logged in (default `/auth/me` — a JWT login response carries no identity, and without it reports say `Logged-in: None` and `doctor`'s per-role check proves only that the password was right), and where the SPA keeps the token in the browser (`{"kind": "localStorage", "key": "...", "value": "{token}"}` → injected into Playwright storageState). Cookie-session apps need none of these. Example (RealWorld): path `/api/users/login`, body `{"user": {"email": "{email}", "password": "{password}"}}`
@@ -195,7 +196,7 @@ cd <project>/.web-qa
 npm install -D @playwright/test
 npx playwright install chromium
 grep -q node_modules .gitignore 2>/dev/null || echo 'node_modules/' >> .gitignore
-cp "${CLAUDE_PLUGIN_ROOT}/playwright.config.template.ts" playwright.config.ts   # adjust baseURL
+cp "${CLAUDE_PLUGIN_ROOT}/playwright.config.template.ts" playwright.config.ts   # baseURL comes from WEBQA_BASE_URL at run time
 ```
 Pin `@playwright/test` to an exact version: every version pins an exact browser build, and an unplanned upgrade means an unplanned browser download.
 

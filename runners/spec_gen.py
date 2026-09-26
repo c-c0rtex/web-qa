@@ -28,8 +28,9 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import urlparse
 
-from explore import load_project, resolve_credentials
+from explore import credential_vars, load_project, registry_secrets, resolve_credentials
 from progress import Progress, emit
 from run_scenarios import (DEFAULT_BACKEND_PREFIXES, declared_type, extract_paths, norm_route,
                            split_tcs, tc_roles, tc_routes)
@@ -66,9 +67,13 @@ DEFAULT_AUTH_HINT = (
 PROMPT_TEMPLATE = """You are generating a Playwright TypeScript test for an existing {stack} app.
 
 PROJECT CONTEXT:
-- Frontend base URL: {frontend_url}
-- Backend API base URL: {backend_url}
-- Test credentials: email="{login_email}" password="{login_password}"
+- Frontend: the Playwright config's `baseURL`. Navigate with RELATIVE paths: `page.goto('/orders')`
+- Backend API: read it from the environment once, at the top of the file —
+  `const API = process.env.WEBQA_BACKEND_URL!;` — and build every API URL from it (`${{API}}/orders`)
+- Test credentials: `process.env.{email_var}!` and `process.env.{password_var}!`
+- NEVER write a host, a port, the test account's email or any password into the spec. The file
+  lives in the project's repo and must run against any stand; the runner sets these variables.
+  A spec containing one is rejected
 - AUTH FLOW (follow EXACTLY, do not invent cookies or headers): {auth_login_hint}
 - Playwright TEST TIMEOUT for this project: {test_timeout_ms} ms (whole test, all steps)
 {seed_section}
@@ -116,7 +121,7 @@ REQUIREMENTS:
 - When a name occurs more than once in the snapshot, scope before matching
   (`page.getByRole('navigation').getByRole('link', {{ name: 'X' }})`) — an unscoped locator
   that resolves to 2+ elements fails on strict mode, not on the app being wrong
-- For navigation ALWAYS: `await page.goto('{frontend_url}<path>', {{ waitUntil: 'domcontentloaded' }})` —
+- For navigation ALWAYS: `await page.goto('<path>', {{ waitUntil: 'domcontentloaded' }})` (relative to baseURL) —
   never the default 'load' and never 'networkidle': Next.js dev keeps an HMR websocket open, so
   those states never settle and the test burns its whole timeout
 - NEVER use `waitForLoadState('networkidle')` anywhere. Web-first assertions
@@ -127,9 +132,9 @@ REQUIREMENTS:
 - NEVER hardcode an entity id, and never take one from the APP MAP. `/orders/48` in the map is
   one sample from one crawl; by the time this spec runs, mutating specs have created and
   deleted rows and id 48 may belong to something else or nothing. Discover it:
-      const list = await api.get(`{backend_url}/orders`);           // respect the declared bounds
+      const list = await api.get(`${{API}}/orders`);                // respect the declared bounds
       const id = (await list.json()).items[0].id;                   // or find one matching the TC
-      await page.goto(`{frontend_url}/orders/${{id}}`, {{ waitUntil: 'domcontentloaded' }});
+      await page.goto(`/orders/${{id}}`, {{ waitUntil: 'domcontentloaded' }});
   A spec that asserts `getByRole('heading', {{ name: /Order 48/ }})` is asserting the state of a
   database, not the behaviour of a page
 - Keep the spec self-contained; no external helpers
@@ -184,13 +189,13 @@ UI-FIRST RULE (what makes the spec worth anything):
   artifact a human needs to judge the failure is blank
 
 AUTH RULE (the single most common way these specs die):
-- Use the credentials given above VERBATIM. Never invent an email, never pattern-match one
-  from another account's domain
+- Log in with exactly the environment variables named above. Never invent an email, never
+  substitute another account's
 - `page.request` shares the BROWSER context: it carries session cookies, and nothing else.
-  If the AUTH FLOW returns a bearer token, every call to {backend_url} must go through a
+  If the AUTH FLOW returns a bearer token, every call to `API` must go through a
   request context that sends it — `request.newContext({{ extraHTTPHeaders: {{ Authorization:
   `Bearer ${{token}}` }} }})`. `page.request.get(API_URL)` without that header is a 401
-- The only legitimate use of `page.request` against {backend_url} is the login POST itself
+- The only legitimate use of `page.request` against `API` is the login POST itself
 
 READING TEXT, URLS AND NUMBERS BACK OUT (how a correct spec still goes red):
 - Names in the APP MAP come from the DOM. `innerText()` returns RENDERED text, and CSS
@@ -250,6 +255,31 @@ YOUR PREVIOUS ATTEMPT FAILED — playwright could not parse the generated file:
 
 Output the FULL corrected .spec.ts (just the code, no fences):
 """
+
+LEAK_RETRY_SUFFIX = """
+
+YOUR PREVIOUS ATTEMPT WAS REJECTED — it hardcodes {found}.
+Read the backend from `process.env.WEBQA_BACKEND_URL`, navigate with relative paths (the
+config's baseURL supplies the host), and take the login from the environment variables named
+in PROJECT CONTEXT. Output the FULL corrected .spec.ts (just the code, no fences):
+"""
+
+def stand_values_in(code: str, proj: dict | None) -> list[str]:
+    """What of the stand a generated spec hardcoded — named by KIND, never by value: this
+    text is printed and fed back into the prompt, and a password must not travel either way."""
+    if not proj:
+        return []
+    found = set()
+    if any(pw in code for pw in registry_secrets(proj)):
+        found.add("a password from the registry")
+    accounts = [proj.get("auth") or {}] + list(proj.get("roles") or [])
+    if any(a.get("email") and a["email"] in code for a in accounts):
+        found.add("a test account's email")
+    for label, url in (("frontend", proj.get("target_url")), ("backend", proj.get("backend_url"))):
+        netloc = urlparse(url).netloc if url else ""
+        if netloc and netloc in code:
+            found.add(f"the {label} host:port")
+    return sorted(found)
 
 PROBE_RETRY_SUFFIX = """
 
@@ -948,6 +978,13 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
             last_err = "empty output from claude"
             _note(f"RETRY {tc_key}: empty output (costs another full call)")
             continue
+        leaks = stand_values_in(code, proj)
+        if leaks:
+            # never written: a spec file is kept in the project repo
+            last_err = f"spec hardcodes {', '.join(leaks)}"
+            attempt_prompt = prompt + LEAK_RETRY_SUFFIX.format(found=", ".join(leaks))
+            _note(f"RETRY {tc_key}: spec hardcodes {', '.join(leaks)} (costs another full call)")
+            continue
         out_path.write_text(postprocess_spec(code), encoding="utf-8")
         parse_err = validate_spec(webqa, out_path)
         if parse_err is not None:
@@ -981,12 +1018,12 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     cache_path = specs_dir / ".cache.json"
     cache = load_cache(cache_path)
 
-    frontend_url = proj.get("target_url") or proj.get("frontend_url") or "http://127.0.0.1:3000"
-    backend_url = proj.get("backend_url") or frontend_url
     stack = proj.get("stack") or "web"
     test_data_prefix = proj.get("test_data_prefix") or "QA-"
-    auth_login_hint = proj.get("auth_login_hint") or DEFAULT_AUTH_HINT
-    login_email, login_password = resolve_credentials(proj, None, None)
+    # the hint names the backend as a placeholder; the spec reaches it through `API`
+    auth_login_hint = re.sub(r"\{backend(?:_url)?\}", "${API}",
+                             proj.get("auth_login_hint") or DEFAULT_AUTH_HINT)
+    resolve_credentials(proj, None, None)     # fail fast: no default account → no specs
     backend_prefixes = tuple(proj.get("backend_prefixes") or DEFAULT_BACKEND_PREFIXES)
     # Per-TC below (ARIA sliced to the routes that TC visits). The FULL map still keys the
     # cache: a re-crawl that changes any route must invalidate every spec, not just the
@@ -999,8 +1036,10 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     a11y_facts = a11y_section(webqa)
     frontend_dir = proj_dir / proj["frontend_dir"] if proj.get("frontend_dir") else proj_dir
     dnd_section = dnd_recipe_section(detect_dnd_library(frontend_dir))
-    # Cache key covers everything that shapes the output: TC body + template + app map + seed + urls
-    env_hash = tc_hash(PROMPT_TEMPLATE + app_map_digest + seed + frontend_url + backend_url
+    # Cache key covers everything that shapes the output: TC body + template + app map + seed.
+    # Not the stand's URLs or passwords: specs read those from the environment, so moving
+    # to another stand or rotating a password must not regenerate (and re-pay for) a suite.
+    env_hash = tc_hash(PROMPT_TEMPLATE + app_map_digest + seed + auth_login_hint
                        + dnd_section + str(test_timeout_ms) + fixture_list + a11y_facts)
 
     md_files = sorted(scenarios_dir.glob("*.md"))
@@ -1027,25 +1066,22 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
             declared = tc_roles(tc.get("body", ""))
             if declared:
                 try:
-                    tc_email, tc_password = resolve_credentials(proj, None, None, role=declared[0])
+                    resolve_credentials(proj, None, None, role=declared[0])
                 except SystemExit:
                     # A registry gap, not a generation failure: costs nothing, fixed by the
                     # human, and must not be buried among real errors or leave a .FAILED marker
                     summary["skipped_missing_role"].append({"tc": tc_key, "role": declared[0]})
                     continue
-            else:
-                tc_email, tc_password = login_email, login_password
-            body_hash = tc_hash(tc.get("body", "") + env_hash + tc_email + tc_password)
+            email_var, password_var = credential_vars(declared[0] if declared else None)
+            body_hash = tc_hash(tc.get("body", "") + env_hash + email_var)
             if not force and cache.get(tc_key) == body_hash:
                 summary["skipped_cached"].append(tc_key)
                 continue
             out_path = specs_dir / spec_file_name(scenario_stem, tc_id, tc.get("title", ""))
             prompt = PROMPT_TEMPLATE.format(
                 stack=stack,
-                frontend_url=frontend_url,
-                backend_url=backend_url,
-                login_email=tc_email,
-                login_password=tc_password,
+                email_var=email_var,
+                password_var=password_var,
                 test_data_prefix=test_data_prefix,
                 auth_login_hint=auth_login_hint,
                 test_timeout_ms=test_timeout_ms,

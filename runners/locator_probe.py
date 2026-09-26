@@ -101,9 +101,13 @@ def role_from_spec(source: str, proj: dict) -> str | None:
     under a reader session yields a false zero. A spec may contain several accounts
     (API setup as one, UI as another) — a role-account match wins over the default
     `auth` account, because role creds only appear when the TC declared that role."""
+    from explore import credential_vars
     emails = set(RE_EMAIL_LITERAL.findall(source))
     for r in proj.get("roles") or []:
         if r.get("email") in emails:
+            return r.get("name")
+        # current specs carry no literals — they read `process.env.WEBQA_ROLE_<NAME>_EMAIL`
+        if r.get("name") and credential_vars(r["name"])[0] in source:
             return r.get("name")
     return None
 

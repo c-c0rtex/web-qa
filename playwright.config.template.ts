@@ -1,8 +1,9 @@
 /**
  * Template playwright.config.ts for <project>/.web-qa/
  *
- * Copy to <project>/.web-qa/playwright.config.ts and adjust baseURL/viewport
- * to match the project. Used by `web-qa-run-specs --alias <a>`.
+ * Copy to <project>/.web-qa/playwright.config.ts. The stand's URL comes from the
+ * registry at run time (WEBQA_BASE_URL); nothing here is project-specific.
+ * Used by `web-qa-run-specs --alias <a>`.
  *
  * Setup once per project (NOT `npm init -y` — the ".web-qa" dir name is an
  * invalid npm package name; and a bare `npm install` without a local
@@ -44,7 +45,10 @@ export default defineConfig({
   // 2 retries in CI separate transient flakes from real failures; 0 locally for fast feedback
   retries: process.env.CI ? 2 : 0,
   use: {
-    baseURL: 'http://127.0.0.1:3000',
+    // The stand is not the spec's business: web-qa-matrix / -run-specs / -maintain set
+    // WEBQA_BASE_URL from the registry (a caller's own value wins — that is how CI retargets),
+    // and generated specs navigate with relative paths against it.
+    baseURL: process.env.WEBQA_BASE_URL ?? 'http://127.0.0.1:3000',
     // Without this, a locator that never matches makes `click`/`fill` wait until the
     // 30s TEST timeout, and playwright reports a bare "Test timeout of 30000ms
     // exceeded." with no locator, no step, nothing. Bounding the ACTION instead

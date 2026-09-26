@@ -20,16 +20,10 @@ if [ -z "$ALIAS" ]; then
   exit 2
 fi
 
-PROJECT_PATH=$(python3 -c "
-import json, sys
-sys.path.insert(0, '$SKILL_DIR/runners')
-from registry import registry_path
-with open(registry_path()) as f:
-    for p in json.load(f):
-        if p['alias'] == '$ALIAS':
-            print(p['path']); sys.exit(0)
-sys.exit(1)
-") || { echo "alias not found: $ALIAS" >&2; exit 2; }
+# project path + the stand's URLs and logins as WEBQA_* (specs read them; they never carry them)
+SHELL_ENV=$(uv run --project "$SKILL_DIR" python -u "$SKILL_DIR/runners/print_spec_env.py" --alias "$ALIAS") \
+  || { echo "alias not found: $ALIAS" >&2; exit 2; }
+eval "$SHELL_ENV"
 
 cd "$PROJECT_PATH/.web-qa"
 if [ ! -f playwright.config.ts ]; then

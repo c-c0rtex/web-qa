@@ -125,6 +125,11 @@ Useful environment variables:
 - `WEBQA_GEN_TIMEOUT=600` — seconds per spec generation (default 300)
 - `WEBQA_WORKERS=4` — Playwright workers (template config)
 
+Generated specs carry no host, port, email or password. They navigate relative to `baseURL` and read the rest at run time; `web-qa-matrix`, `web-qa-run-specs` and `web-qa-maintain` set it from the registry, and a value you export yourself wins (that is how CI points a suite at its own stand):
+
+- `WEBQA_BASE_URL`, `WEBQA_BACKEND_URL` — the stand
+- `WEBQA_EMAIL` / `WEBQA_PASSWORD` — the default account; `WEBQA_ROLE_<NAME>_EMAIL` / `_PASSWORD` per role
+
 ## Token cost, honestly
 
 - Exploration, running tests, the matrix, visual diff, a11y: **zero tokens** — plain Python + Playwright.

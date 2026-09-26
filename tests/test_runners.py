@@ -535,6 +535,33 @@ def test_materialize_path_is_data_driven():
     assert materialize_path("/x/{unknown}", ids) == "/x/{unknown}"
 
 
+def test_materialize_path_picks_the_entity_the_route_names():
+    """A generic {id} got the FIRST discovered id: /shipments/{id}/items opened with
+    an order's id, and where the id ranges overlapped it even looked right."""
+    from run_scenarios import id_routes
+    ids = {"order": 42, "shipment": 7, "contact": 381}
+    assert materialize_path("/shipments/{id}/items", ids) == "/shipments/7/items"
+    assert materialize_path("/factories/{id}", {"order": 1, "factory": 6}) == "/factories/6"
+    # a URL word the API does not use is not guessed — it needs an explicit `route`
+    assert materialize_path("/people/{id}", ids) == "/people/{id}"
+    routes = id_routes([{"endpoint": "/directory/contacts", "key": "contact", "route": "/people/{id}"},
+                        {"endpoint": "/orders", "key": "order"}])
+    assert routes == {"/people/{id}": "contact"}
+    assert materialize_path("/people/{id}", ids, routes) == "/people/381"
+    assert materialize_path("/people/teams/{id}", {"team": 5, "contact": 381}, routes) == "/people/teams/5"
+    # nothing names the entity → the placeholder stays and the caller skips the probe
+    assert materialize_path("/help/{section}", ids) == "/help/{section}"
+
+def test_a_tc_whose_every_path_is_unresolved_is_skipped_not_passed(tmp_path):
+    """Skipping the unresolved GOTO left `overall = "pass"` with nothing opened."""
+    from run_scenarios import DEFAULT_BACKEND_PREFIXES, run_passive_tc
+    tc = {"id": "TC-K1", "title": "card",
+          "body": "**Type:** passive\n**Steps:**\n1. Open `/people/{id}`\n**Expected:**\n- contact card\n"}
+    res = run_passive_tc(tc, None, "http://app", "http://api", {}, {"order": 1}, tmp_path,
+                         tmp_path, False, 5.0, DEFAULT_BACKEND_PREFIXES, [], [], [])
+    assert res["status"] == "skip"
+    assert any("unresolved placeholder" in n for n in res["notes"])
+
 def test_split_tcs_parses_headers():
     md = "## TC-A1 — first case\nbody a\n## TC-B2 — second\nbody b\n"
     tcs = split_tcs(md)
@@ -1196,6 +1223,67 @@ def test_is_static_asset():
         assert not is_static_asset(p), p
 
 
+def test_framework_plumbing_is_not_a_page():
+    """`/_next/image?url=%2Flogo.png` has no extension in its PATH; it was crawled and
+    mapped as a route (and mined from next.config's `path: '/_next/image'`)."""
+    from explore import is_not_a_page
+    from route_mine import is_framework_internal
+    for p in ["/_next/image", "/_next/static/chunks/x", "/_nuxt/app.js", "/@vite/client"]:
+        assert is_not_a_page(p), p
+    for p in ["/next-steps", "/orders", "/help/_next-release", "/"]:
+        assert not is_not_a_page(p), p
+    assert is_framework_internal("/_next/image") and not is_framework_internal("/_nexus")
+
+def test_a_slug_is_an_instance_of_its_declared_template():
+    """`/help/dashboard` … were 11 distinct routes (11 pages of budget, no per-template cap)
+    and none counted as reaching `/help/{section}`, reported as never reached."""
+    from explore import annotate_origins, dedupe_by_template, normalize_for_dedup
+    from route_mine import TemplateIndex
+    mined = [{"path": p, "source": "next-app"} for p in
+             ["/people", "/people/archive", "/people/{id}", "/people/teams/{id}", "/help/{section}"]]
+    idx = TemplateIndex([m["path"] for m in mined])
+    key = lambda u: normalize_for_dedup(u, idx)  # noqa: E731
+    assert key("http://a/help/dashboard") == key("http://a/help/orders") == "http://a/help/{id}"
+    assert key("http://a/people/archive") == "http://a/people/archive"    # static route wins
+    assert key("http://a/people/381") == "http://a/people/{id}"
+    assert key("http://a/people/teams/5") == "http://a/people/teams/{id}"  # most specific wins
+    pages = [{"path": "/help/dashboard"}, {"path": "/help/orders"}, {"path": "/people"},
+             {"path": "/people/archive"}, {"path": "/people/381"}, {"path": "/people/teams/5"}]
+    annotated = annotate_origins(pages, mined)
+    assert not [p for p in annotated if p.get("uncrawled")]       # every template reached
+    rows = dedupe_by_template(annotated)
+    assert [r.get("template") for r in rows if "help" in r["path"]] == ["/help/{section}"]
+
+def test_merge_does_not_carry_over_another_instance_of_a_slug_template():
+    from explore import merge_pages
+    from route_mine import TemplateIndex
+    idx = TemplateIndex(["/help/{section}"])
+    merged, report = merge_pages([{"path": "/help/audit"}], [{"path": "/help/orders"}],
+                                 "2026-09-27", idx)
+    assert report["carried_over"] == []
+    assert [p["path"] for p in merged] == ["/help/orders"]
+
+def test_page_budget_covers_every_mined_route():
+    from explore import DEFAULT_MAX_PAGES, auto_max_pages
+    assert auto_max_pages(34, 11) == 56           # 34 concrete + 2 × 11 templates
+    assert auto_max_pages(3, 1) == DEFAULT_MAX_PAGES
+
+def test_the_click_pass_has_a_page_budget():
+    """Twelve missed clicks, each followed by a re-navigation, put a form page at 3+ minutes."""
+    import inspect
+    from explore import INTERACTIVE_PAGE_BUDGET_S, interactive_discover
+    src = inspect.getsource(interactive_discover)
+    assert "deadline" in src and "page budget spent" in src
+    assert INTERACTIVE_PAGE_BUDGET_S <= 60
+
+def test_parametrized_mined_routes_are_seeded_with_real_ids():
+    """They were dropped from the seeds ("can't be built into a URL without ids") though
+    id_discovery existed for exactly that; cards no list linked to never got a DOM."""
+    import inspect
+    import explore
+    src = inspect.getsource(explore.main)
+    assert "discover_ids(" in src and "materialize_path(" in src and "seeds +=" in src
+
 ARIA_MAP = """# map
 
 ## Routes (frontend)
@@ -1704,7 +1792,8 @@ def test_drift_does_not_confuse_expect_timeout_with_the_test_budget():
     from doctor import playwright_config_drift
     ok = ("outputDir: process.env.WEBQA_OUTPUT_DIR ?? 'test-results',\n"
           "timeout: 60_000,\n  expect: { timeout: 8_000 },\n"
-          "  use: { actionTimeout: 10_000, navigationTimeout: 15_000 },\n")
+          "  use: { baseURL: process.env.WEBQA_BASE_URL ?? 'http://127.0.0.1:3000',\n"
+          "         actionTimeout: 10_000, navigationTimeout: 15_000 },\n")
     assert playwright_config_drift(ok) == []
 
 
@@ -2353,8 +2442,8 @@ def test_op_params_carries_the_bounds():
 def _prompt(**over):
     """Format PROMPT_TEMPLATE with every placeholder filled. One place to update when the
     template grows a section — eight tests used to break on each new one."""
-    kw = dict(stack="next", frontend_url="http://f", backend_url="http://b", login_email="e@x",
-              login_password="pw", test_timeout_ms=60000, seed_section="", app_context="MAP",
+    kw = dict(stack="next", email_var="WEBQA_EMAIL", password_var="WEBQA_PASSWORD",
+              test_timeout_ms=60000, seed_section="", app_context="MAP",
               dnd_section="", test_data_prefix="QA-", auth_login_hint="hint", tc_body="TC",
               fixtures_section="", a11y_section="")
     kw.update(over)
@@ -2569,3 +2658,102 @@ def test_a_snapshot_that_shrinks_is_reported_not_swallowed():
     _, report = merge_pages(prev, fresh, "2026-07-09")
     assert report["shrunk_aria"] == ["/items"]      # 3000 < 15000 * 0.5
     assert report["lost_aria"] == []                # nothing vanished
+
+
+# ---------------------------------------------------------------------------
+# spec-gen pasted the stand's URLs and the registry's passwords into the prompt, and the
+# model copied both into every spec: a registry password in plain text in each file, and a
+# suite that could only ever run against one host and port.
+# ---------------------------------------------------------------------------
+
+PROJ = {"alias": "a", "path": "/p", "target_url": "http://127.0.0.1:5173",
+        "backend_url": "http://127.0.0.1:8080",
+        "auth": {"email": "admin@x.io", "password": "s3cret-admin"},
+        "roles": [{"name": "viewer", "email": "v@x.io", "password": "s3cret-view"},
+                  {"name": "QA manager", "email": "m@x.io", "password": "s3cret-mgr"}]}
+
+def test_the_stand_reaches_specs_through_the_environment():
+    from explore import credential_vars, registry_secrets, spec_env
+    env = spec_env(PROJ)
+    assert env["WEBQA_BASE_URL"] == "http://127.0.0.1:5173"
+    assert env["WEBQA_BACKEND_URL"] == "http://127.0.0.1:8080"
+    assert (env["WEBQA_EMAIL"], env["WEBQA_PASSWORD"]) == ("admin@x.io", "s3cret-admin")
+    assert credential_vars("QA manager") == ("WEBQA_ROLE_QA_MANAGER_EMAIL", "WEBQA_ROLE_QA_MANAGER_PASSWORD")
+    assert env["WEBQA_ROLE_VIEWER_PASSWORD"] == "s3cret-view"
+    assert registry_secrets(PROJ) == {"s3cret-admin", "s3cret-view", "s3cret-mgr"}
+
+def test_a_callers_environment_wins_and_reports_mask_passwords(monkeypatch):
+    from explore import export_spec_env, redacted_env
+    for k in list(__import__("os").environ):
+        if k.startswith("WEBQA_"):
+            monkeypatch.delenv(k)
+    monkeypatch.setenv("WEBQA_BASE_URL", "http://ci-stand")
+    export_spec_env(PROJ)
+    rec = redacted_env()
+    assert rec["WEBQA_BASE_URL"] == "http://ci-stand"          # CI retargets a suite this way
+    assert rec["WEBQA_PASSWORD"] == rec["WEBQA_ROLE_VIEWER_PASSWORD"] == "***"
+    assert "s3cret" not in str(rec)
+
+def test_the_prompt_names_variables_not_values():
+    from spec_gen import PROMPT_TEMPLATE
+    for gone in ("{frontend_url}", "{backend_url}", "{login_email}", "{login_password}"):
+        assert gone not in PROMPT_TEMPLATE
+    p = _prompt(email_var="WEBQA_ROLE_VIEWER_EMAIL", password_var="WEBQA_ROLE_VIEWER_PASSWORD")
+    assert "process.env.WEBQA_ROLE_VIEWER_EMAIL!" in p and "process.env.WEBQA_BACKEND_URL" in p
+    assert "page.goto('/orders')" in p
+
+def test_a_spec_that_hardcodes_the_stand_is_named_by_kind_not_value():
+    from spec_gen import stand_values_in
+    leaky = ("const r = await page.request.post('http://127.0.0.1:8080/auth/login', "
+             "{ data: { email: 'v@x.io', password: 's3cret-view' } });\n"
+             "await page.goto('http://127.0.0.1:5173/orders');")
+    found = stand_values_in(leaky, PROJ)
+    assert found == ["a password from the registry", "a test account's email",
+                     "the backend host:port", "the frontend host:port"]
+    assert not any("s3cret" in f or "x.io" in f for f in found)
+    clean = ("const API = process.env.WEBQA_BACKEND_URL!;\n"
+             "await page.goto('/orders');  // email: process.env.WEBQA_EMAIL!")
+    assert stand_values_in(clean, PROJ) == []
+
+def test_a_leaky_generation_is_never_written(tmp_path, monkeypatch):
+    import spec_gen
+    replies = iter(["await page.goto('http://127.0.0.1:5173/x'); // s3cret-admin",
+                    "test('TC-1: x', async ({ page }) => { await page.goto('/x'); });"])
+    written: list[str] = []
+    monkeypatch.setattr(spec_gen, "call_claude", lambda prompt, **k: next(replies))
+    monkeypatch.setattr(spec_gen, "validate_spec",
+                        lambda webqa, out: written.append(out.read_text()) or None)
+    out = tmp_path / "x.spec.ts"
+    key, err, _ = spec_gen.gen_one("s::TC-1", "PROMPT", out, tmp_path, PROJ, live_probe=False)
+    assert err is None
+    assert all("s3cret" not in w and "5173" not in w for w in written)
+    assert "s3cret" not in out.read_text()
+
+def test_doctor_flags_a_hardcoded_base_url():
+    from doctor import playwright_config_drift
+    cfg = ("outputDir: process.env.WEBQA_OUTPUT_DIR ?? 'test-results',\n"
+           "use: { baseURL: 'http://127.0.0.1:3000', actionTimeout: 1, navigationTimeout: 1 },\n")
+    assert any("baseURL" in p for p in playwright_config_drift(cfg))
+
+def test_role_is_recognised_from_its_env_var():
+    from locator_probe import role_from_spec
+    src = "await login(process.env.WEBQA_ROLE_VIEWER_EMAIL!, process.env.WEBQA_ROLE_VIEWER_PASSWORD!)"
+    assert role_from_spec(src, PROJ) == "viewer"
+
+def test_every_playwright_launch_gets_the_spec_environment():
+    import inspect
+    import matrix
+    import maintain
+    assert "export_spec_env(proj)" in inspect.getsource(matrix.main)
+    assert "redacted_env()" in inspect.getsource(matrix.main)
+    assert "export_spec_env(proj)" in inspect.getsource(maintain.main)
+    from pathlib import Path
+    wrapper = (Path(__file__).resolve().parent.parent / "bin" / "web-qa-run-specs").read_text()
+    assert "print_spec_env.py" in wrapper and 'eval "$SHELL_ENV"' in wrapper
+
+def test_a_heal_that_copies_a_url_from_the_error_is_not_written():
+    """playwright errors name full URLs; a fix copying one pins the spec to one stand."""
+    import inspect
+    from maintain import heal_one
+    src = inspect.getsource(heal_one)
+    assert src.index("stand_values_in(code, proj)") < src.index("out_file.write_text(code")

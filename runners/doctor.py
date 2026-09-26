@@ -42,6 +42,11 @@ def playwright_config_drift(text: str) -> list[str]:
     problems: list[str] = []
     # Comments explain these invariants; they must not be mistaken for declaring them.
     code = re.sub(r"/\*.*?\*/", "", re.sub(r"//[^\n]*", "", text), flags=re.S)
+    # Specs navigate relative to baseURL and read WEBQA_BASE_URL through it; a literal host
+    # here pins every spec to one stand, and the runners' WEBQA_BASE_URL is ignored.
+    if "WEBQA_BASE_URL" not in code:
+        problems.append("`baseURL` is hardcoded, not `process.env.WEBQA_BASE_URL ?? …`: the "
+                        "suite runs only against that one host")
     if "actionTimeout" not in text:
         problems.append("no `actionTimeout`: a locator that never matches hangs until the "
                         "test timeout and reports no locator name")
@@ -136,7 +141,8 @@ def http_ok(url: str, timeout: float = 5.0) -> tuple[bool, str]:
 
 def check_project(results: list[dict], alias: str) -> None:
     # imported lazily so a broken env fails in the deps CHECK, not with a traceback on startup
-    from explore import api_login, load_project, resolve_credentials, viewport_entries
+    from explore import (api_login, load_project, registry_secrets, resolve_credentials,
+                         viewport_entries)
     try:
         proj = load_project(alias)
     except SystemExit as e:
@@ -248,6 +254,19 @@ def check_project(results: list[dict], alias: str) -> None:
     check(results, "scenarios", OK if scen else WARN, f"{len(scen)} file(s)",
           "" if scen else "web-qa-generate --diff/--task, or write scenarios/*.md")
 
+    # specs generated before spec_env carry the registry's passwords in their source
+    secrets = registry_secrets(proj)
+    spec_files = sorted((webqa / "specs").glob("*.spec.ts")) if (webqa / "specs").is_dir() else []
+    leaking = [f.name for f in spec_files
+               if any(pw in f.read_text(encoding="utf-8", errors="ignore") for pw in secrets)]
+    if leaking:
+        check(results, "specs: secrets", WARN,
+              f"{len(leaking)} spec(s) contain a registry password in plain text, e.g. {leaking[0]}",
+              "regenerate them (web-qa-spec-gen --force) — generated specs now read logins from "
+              "WEBQA_* env vars; and check whether any was committed")
+    elif spec_files:
+        check(results, "specs: secrets", OK, "no registry password in any spec")
+
     # specs runner setup
     pw_config = webqa / "playwright.config.ts"
     if pw_config.is_file() and (webqa / "node_modules" / "@playwright" / "test").is_dir():
@@ -255,7 +274,8 @@ def check_project(results: list[dict], alias: str) -> None:
         drift = playwright_config_drift(pw_config.read_text(encoding="utf-8"))
         if drift:
             check(results, "playwright.config.ts", WARN, f"{len(drift)} problem(s): " + "; ".join(drift),
-                  f"re-copy {SKILL / 'playwright.config.template.ts'} and re-apply your baseURL")
+                  f"re-copy {SKILL / 'playwright.config.template.ts'} (the stand's URL now "
+                  f"comes from the registry via WEBQA_BASE_URL)")
         else:
             check(results, "playwright.config.ts", OK, "matches the template's invariants")
     else:

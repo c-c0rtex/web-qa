@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import time
 from collections import deque
@@ -31,7 +32,8 @@ from playwright.sync_api import sync_playwright
 
 from progress import Progress, emit, fmt_bytes
 from registry import registry_path
-from route_mine import as_template, mine_routes
+from entity_ids import discover_ids, id_routes, materialize_path
+from route_mine import TemplateIndex, as_template, is_framework_internal, mine_routes
 
 
 def load_project(alias: str) -> dict:
@@ -80,6 +82,51 @@ def resolve_credentials(proj: dict, email: str | None, password: str | None,
         )
     return email, password
 
+
+def role_env_prefix(role: str) -> str:
+    """`viewer` → `WEBQA_ROLE_VIEWER`, `QA manager` → `WEBQA_ROLE_QA_MANAGER`."""
+    return "WEBQA_ROLE_" + re.sub(r"[^A-Za-z0-9]+", "_", role).strip("_").upper()
+
+def credential_vars(role: str | None = None) -> tuple[str, str]:
+    """Names of the env vars a generated spec reads its login from."""
+    if role:
+        prefix = role_env_prefix(role)
+        return f"{prefix}_EMAIL", f"{prefix}_PASSWORD"
+    return "WEBQA_EMAIL", "WEBQA_PASSWORD"
+
+def spec_env(proj: dict) -> dict[str, str]:
+    """What a generated spec reads at run time instead of carrying it in its source.
+
+    spec-gen used to paste the stand's URLs and the account's password into the prompt, and
+    the model copied both into every file: a suite pinned to one host and port, and a
+    registry password in plain text across a hundred files that live in the project repo.
+    Every runner that starts playwright passes this environment instead."""
+    env = {"WEBQA_BASE_URL": proj["target_url"],
+           "WEBQA_BACKEND_URL": proj.get("backend_url") or proj["target_url"]}
+    auth = proj.get("auth") or {}
+    if auth.get("email") and auth.get("password"):
+        env["WEBQA_EMAIL"], env["WEBQA_PASSWORD"] = auth["email"], auth["password"]
+    for r in proj.get("roles") or []:
+        if r.get("name") and r.get("email") and r.get("password"):
+            ev, pv = credential_vars(r["name"])
+            env[ev], env[pv] = r["email"], r["password"]
+    return env
+
+def export_spec_env(proj: dict) -> None:
+    """Put spec_env into this process's environment, so every playwright child inherits it.
+    A value already set by the caller wins — that is how CI points a suite at its stand."""
+    for k, v in spec_env(proj).items():
+        os.environ.setdefault(k, v)
+
+def redacted_env() -> dict[str, str]:
+    """WEBQA_* variables for a report: passwords masked, the rest as run."""
+    return {k: ("***" if k.endswith("_PASSWORD") else v)
+            for k, v in sorted(os.environ.items()) if k.startswith("WEBQA_")}
+
+def registry_secrets(proj: dict) -> set[str]:
+    """Every password the registry holds for this project — must never appear in a spec."""
+    accounts = [proj.get("auth") or {}] + list(proj.get("roles") or [])
+    return {a["password"] for a in accounts if a.get("password")}
 
 DEFAULT_VIEWPORT = {"width": 1280, "height": 900}
 MANUAL_MARKER = "<!-- manual -->"
@@ -340,15 +387,24 @@ def extract_page_summary(page) -> dict:
     return page.evaluate(js)
 
 
-def normalize_for_dedup(url: str) -> str:
+def normalize_for_dedup(url: str, templates: TemplateIndex | None = None) -> str:
     """Dedup key: strip query/fragment, collapse numeric path segments to {id}.
-    /orders?page=2 and /orders are one page; /orders/17 and /orders/42 are one template."""
+    /orders?page=2 and /orders are one page; /orders/17 and /orders/42 are one template.
+    With `templates` (the routes mined from source) a slug collapses too:
+    /help/dashboard and /help/orders are both /help/{section}."""
     parsed = urlparse(url.split("#")[0])
-    path = re.sub(r"/\d+(?=/|$)", "/{id}", parsed.path) or "/"
+    if templates is not None:
+        path = templates.key(parsed.path or "/")
+    else:
+        path = re.sub(r"/\d+(?=/|$)", "/{id}", parsed.path) or "/"
     return f"{parsed.scheme}://{parsed.netloc}{path}"
 
 
 INTERACTIVE_CLICKS_PER_PAGE = 12
+# Wall-clock cap for one page's click pass. A click that misses costs its own timeout plus a
+# full re-navigation back (up to 10 s); twelve of those put forms and entity cards at 3+
+# minutes EACH, and an 80-page interactive crawl past 45 minutes.
+INTERACTIVE_PAGE_BUDGET_S = 30.0
 
 
 DIALOG_ARIA_MAX = 8000
@@ -419,7 +475,12 @@ def interactive_discover(page, origin: str) -> tuple[list[str], list[dict]]:
     try:
         sel = "button, [role=button], [role=tab], [role=menuitem]"
         count = min(page.locator(sel).count(), INTERACTIVE_CLICKS_PER_PAGE)
+        deadline = time.monotonic() + INTERACTIVE_PAGE_BUDGET_S
         for i in range(count):
+            if time.monotonic() > deadline:
+                emit("explore", f"{urlparse(base_url).path or '/'}: click pass stopped at "
+                                f"{i}/{count} — {INTERACTIVE_PAGE_BUDGET_S:.0f}s page budget spent")
+                break
             dismiss_overlays()
             trigger = ""
             try:
@@ -450,7 +511,8 @@ def interactive_discover(page, origin: str) -> tuple[list[str], list[dict]]:
 
 def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
           per_template: int = 2, vp_entry: dict | None = None,
-          seed_paths: list[str] | None = None, interactive: bool = False, bar=None) -> list[dict]:
+          seed_paths: list[str] | None = None, interactive: bool = False, bar=None,
+          templates: TemplateIndex | None = None) -> list[dict]:
     """BFS over same-origin URLs, return list of page summaries.
     Visits at most `per_template` concrete URLs per normalized route template so
     entity cards (/orders/1, /orders/2, …) don't eat the whole max_pages budget.
@@ -469,12 +531,12 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
         t = urlparse(target)
         if f"{t.scheme}://{t.netloc}" != origin:
             return
-        if is_static_asset(t.path):
+        if is_not_a_page(t.path):
             return
         # dedup already collapses the query, so visiting `/orders?loaded=14` and `/orders`
         # was always the same page — enqueue the canonical form and keep it out of the map
         target = urlunparse(t._replace(query="", fragment=""))
-        tkey = normalize_for_dedup(target)
+        tkey = normalize_for_dedup(target, templates)
         if "{id}" in tkey:
             if target.split("#")[0] in visited or template_counts.get(tkey, 0) >= per_template:
                 return
@@ -490,7 +552,7 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
 
         while queue and len(pages) < max_pages:
             url = queue.popleft()
-            key = normalize_for_dedup(url)
+            key = normalize_for_dedup(url, templates)
             if "{id}" in key:
                 # entity-card template: allow up to per_template distinct concrete URLs
                 exact = url.split("#")[0]
@@ -516,7 +578,7 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
                 continue
             # SPA redirected us elsewhere (e.g. /login → / for an authenticated session):
             # record the redirect instead of duplicating the landing page's row
-            landed_key = normalize_for_dedup(page.url)
+            landed_key = normalize_for_dedup(page.url, templates)
             if landed_key != key:
                 if landed_key in visited:
                     pages.append({"path": urlparse(url).path or "/",
@@ -592,6 +654,11 @@ def is_static_asset(path: str) -> bool:
     return bool(STATIC_EXT.search(urlparse(path).path))
 
 
+def is_not_a_page(path: str) -> bool:
+    """Static files and framework plumbing (`/_next/image`) share the app's origin and get
+    linked from its pages, but neither is a route a test could open."""
+    return is_static_asset(path) or is_framework_internal(urlparse(path).path)
+
 def sidecar_path(out: Path) -> Path:
     """app.context.md → app.context.json — the machine-readable twin the next crawl
     merges against. Parsing the rendered markdown back would be fragile."""
@@ -615,15 +682,17 @@ def page_key(p: dict) -> str:
     return k.split("#")[0].split("?")[0] or ("/" if k else "")
 
 
-def merge_pages(prev: list[dict], fresh: list[dict], today: str) -> tuple[list[dict], dict]:
+def merge_pages(prev: list[dict], fresh: list[dict], today: str,
+                templates: TemplateIndex | None = None) -> tuple[list[dict], dict]:
     """Union by route — a crawl that did not reach a route must not delete it.
 
     The auto part of app.context.md is rewritten from scratch on every crawl, so a lower
     --max-pages, an expired session or one slow page silently replaced a good map with a
     worse one. Every spec generated afterwards then guessed its selectors. Carrying the
     previous entry over (marked stale) keeps ground truth that specs already depend on."""
+    tkey = templates.key if templates is not None else as_template
     fresh_by = {page_key(p): p for p in fresh if page_key(p)}
-    fresh_templates = {as_template(k) for k in fresh_by}
+    fresh_templates = {tkey(k) for k in fresh_by}
     # Dialogs are captured only by `--interactive`. A plain re-crawl would otherwise erase
     # what an expensive interactive pass found, and nothing would say so.
     prev_dialogs = {page_key(p): p["dialogs"] for p in prev if p.get("dialogs") and page_key(p)}
@@ -636,9 +705,9 @@ def merge_pages(prev: list[dict], fresh: list[dict], today: str) -> tuple[list[d
         k = page_key(p)
         if not k or k in fresh_by or p.get("uncrawled"):
             continue
-        if is_static_asset(k):
+        if is_not_a_page(k):
             continue      # an earlier crawl mistook assets for routes; don't resurrect them
-        if as_template(k) in fresh_templates:
+        if tkey(k) in fresh_templates:
             continue      # `/orders/23` from last week adds nothing once `/orders/25` is mapped
         q = dict(p)
         q["stale_since"] = p.get("stale_since") or today
@@ -671,12 +740,17 @@ def annotate_origins(pages: list[dict], mined: list[dict]) -> list[dict]:
     code-declared routes the crawl never reached. Those still belong in the map — and in
     the coverage denominator: a declared route no link leads to is a finding, not noise."""
     mined_by_tpl = {as_template(m["path"]): m for m in mined}
+    index = TemplateIndex([m["path"] for m in mined])
     seen_tpls: set[str] = set()
     for p in pages:
         if "path" not in p:
             continue
-        tpl = as_template(p["path"].split("?")[0])
+        path = p["path"].split("?")[0]
+        tpl = index.key(path)
         seen_tpls.add(tpl)
+        declared = index.declared(path)
+        if declared:
+            p["declared_template"] = declared      # /help/dashboard renders as /help/{section}
         if p.get("stale_since"):
             # carried over from an earlier crawl — say so rather than claim we just saw it
             p["origin"] = f"stale:{p['stale_since']}"
@@ -702,14 +776,15 @@ def dedupe_by_template(pages: list[dict]) -> list[dict]:
         if not path:
             out.append(p)          # error rows carry only `url`
             continue
-        key = as_template(path)          # dedup key: /orders/23 and /orders/{orderId} are one route
+        declared = p.get("declared_template")
+        key = as_template(declared or path)   # /orders/23 and /orders/{orderId} are one route
         if key in seen:
             continue
         seen.add(key)
         q = dict(p)
         # display: keep an author-declared param name (`/help/{section}` says more than
         # `/help/{id}`); collapse only the concrete ids a crawl happened to land on
-        q["template"] = path if "{" in path else re.sub(r"/\d+(?=/|$)", "/{id}", path)
+        q["template"] = declared or (path if "{" in path else re.sub(r"/\d+(?=/|$)", "/{id}", path))
         if q["template"] != path:
             q["sampled_from"] = path
         out.append(q)
@@ -1002,12 +1077,23 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
     return "\n".join(lines) + "\n"
 
 
+DEFAULT_MAX_PAGES = 30
+PER_TEMPLATE = 2
+
+def auto_max_pages(concrete: int, parametrized: int) -> int:
+    """Enough for every mined route: each concrete one once, each template up to the crawl's
+    per-template cap. A fixed 30 against 45 mined routes only printed a warning, and the
+    routes past the cap got no DOM."""
+    return max(DEFAULT_MAX_PAGES, concrete + PER_TEMPLATE * parametrized)
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--alias", required=True)
     ap.add_argument("--email")
     ap.add_argument("--password")
-    ap.add_argument("--max-pages", type=int, default=30)
+    ap.add_argument("--max-pages", type=int, default=None,
+                    help="page budget (default: enough for every route mined from source, "
+                         f"at least {DEFAULT_MAX_PAGES})")
     ap.add_argument("--fresh", action="store_true",
                     help="rebuild the map from this crawl alone; do not carry over routes "
                          "the crawl did not reach (default: merge with the previous map)")
@@ -1041,11 +1127,28 @@ def main() -> int:
         mined = mine_routes(Path(proj["path"]), proj.get("frontend_dir"))
         if mined:
             emit("explore", f"mined {len(mined)} route(s) from source ({', '.join(sorted({m['source'] for m in mined}))})")
-    # concrete mined routes seed the queue; parametrized ones can't be built into a URL
-    # without ids, but still land in the map (and the coverage denominator) via annotate
+    templates = TemplateIndex([m["path"] for m in mined])
     seeds = [m["path"] for m in mined if "{" not in m["path"]]
+    # Parametrized routes were dropped here ("can't be built into a URL without ids") while
+    # id_discovery existed for exactly that. A card or sub-page no list links to with a real
+    # <a href> — rows opened by onClick, a sub-page behind a button — then never got a
+    # DOM, and every spec for it guessed its selectors.
+    dynamic = [m["path"] for m in mined if "{" in m["path"]]
+    if dynamic:
+        id_discovery = proj.get("id_discovery") or []
+        ids = discover_ids(backend, cookies, id_discovery, token)
+        routes = id_routes(id_discovery)
+        built = {t: materialize_path(t, ids, routes) for t in dynamic}
+        seeds += [u for u in built.values() if "{" not in u]
+        unresolved = sorted(t for t, u in built.items() if "{" in u)
+        emit("explore", f"{len(dynamic) - len(unresolved)}/{len(dynamic)} parametrized route(s) "
+                        f"seeded with real ids" + (f"; no id for {', '.join(unresolved)} — add "
+                        f"`id_discovery` entries (with `route` where the URL word differs from "
+                        f"the API's)" if unresolved else ""))
 
-    if mined and args.max_pages < len(mined):
+    if args.max_pages is None:
+        args.max_pages = auto_max_pages(len(mined) - len(dynamic), len(dynamic))
+    elif mined and args.max_pages < len(mined):
         # the route count is known BEFORE the crawl — a cap below it guarantees blind spots
         emit("explore", f"WARNING: --max-pages {args.max_pages} < {len(mined)} routes mined from source. Routes beyond the cap get no DOM, and specs for them will guess their selectors. Raise --max-pages to at least {len(mined)}.")
 
@@ -1053,7 +1156,7 @@ def main() -> int:
     bar.start(f"crawling {target} (max_pages={args.max_pages}, viewport={label}"
               f"{', interactive' if args.interactive else ''})")
     pages = crawl(target, storage, max_pages=args.max_pages, vp_entry=entry,
-                  seed_paths=seeds, interactive=args.interactive, bar=bar)
+                  seed_paths=seeds, interactive=args.interactive, bar=bar, templates=templates)
     crawled_count = len(pages)
     bar.finish(f"{crawled_count} page(s) crawled")
 
@@ -1063,7 +1166,7 @@ def main() -> int:
     merge_report = {"carried_over": [], "new_routes": [], "lost_aria": []}
     if not args.fresh:
         today = time.strftime("%Y-%m-%d", time.gmtime())
-        pages, merge_report = merge_pages(load_prev_pages(out), pages, today)
+        pages, merge_report = merge_pages(load_prev_pages(out), pages, today, templates)
     if merge_report["carried_over"]:
         emit("explore", f"{len(merge_report['carried_over'])} route(s) not reached this crawl, carried over from the previous map: {', '.join(merge_report['carried_over'])}")
     if merge_report["lost_aria"]:

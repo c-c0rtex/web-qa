@@ -35,6 +35,16 @@ MAX_SCAN_FILES = 800
 MAX_FILE_BYTES = 200_000
 MAX_ROUTES = 200
 
+# Framework plumbing served under the app's own origin: never a page a user opens.
+# `/_next/image?url=%2Flogo.png` has no file extension in its PATH (the file is in the
+# query), so the static-asset check let it through and the crawler mapped it as a route.
+FRAMEWORK_INTERNAL = re.compile(
+    r"^/(?:_next|__next|_nuxt|__nuxt|_app/immutable|@vite|@fs|@id|__vite\w*|"
+    r"sockjs-node|__webpack\w*)(?:/|$)")
+
+def is_framework_internal(path: str) -> bool:
+    return bool(FRAMEWORK_INTERNAL.match(path or ""))
+
 RE_PATH_PROP = re.compile(r"""\bpath\s*:\s*['"](/[^'"]*)['"]""")
 RE_ROUTE_JSX = re.compile(r"""<Route[^>]*\spath\s*=\s*["'](/[^"']*)["']""")
 
@@ -175,7 +185,8 @@ def mine_routes(project_root: Path, frontend_dir: str | None = None) -> list[dic
     def add(paths: list[str], source: str) -> None:
         for p in paths:
             p = _normalize(p)
-            found.setdefault(p, source)
+            if not is_framework_internal(p):     # e.g. `path: '/_next/image'` in next.config
+                found.setdefault(p, source)
 
     for base in (root, root / "src"):
         app_dir = base / "app"
@@ -199,3 +210,40 @@ def as_template(path: str) -> str:
     concrete numeric segments → {id} (matches normalize_for_dedup's collapse)."""
     path = re.sub(r"\{[^}]+\}", "{id}", path)
     return re.sub(r"/\d+(?=/|$)", "/{id}", path)
+
+
+class TemplateIndex:
+    """Which mined route a concrete URL is an instance of.
+
+    `as_template` only collapses NUMERIC segments, so `/help/dashboard`, `/help/orders` …
+    were eleven distinct routes to the crawler (eleven pages of the --max-pages budget, no
+    per-template cap) and none of them counted as reaching `/help/{section}`, which the map
+    then reported as never reached. A slug is only recognisable against the declared
+    template. Static routes win, as in every file router: `/people/archive` is its own page,
+    not an instance of `/people/{id}`."""
+
+    def __init__(self, mined_paths: list[str]):
+        self.concrete = {as_template(p) for p in mined_paths if "{" not in p}
+        dynamic = [p for p in mined_paths if "{" in p]
+        # most static segments first: /people/teams/{id} before /people/{id}
+        dynamic.sort(key=lambda p: -sum(1 for s in p.split("/") if s and "{" not in s))
+        self._patterns = [
+            (re.compile("^" + re.sub(r"\\\{[^}]+\\\}", "[^/]+", re.escape(p)) + "$"), p)
+            for p in dynamic
+        ]
+
+    def declared(self, path: str) -> str | None:
+        """The mined template (author's param names kept) `path` instantiates, if any."""
+        path = path.split("#")[0].split("?")[0] or "/"
+        if as_template(path) in self.concrete:
+            return None
+        for rx, tpl in self._patterns:
+            if rx.match(path):
+                return tpl
+        return None
+
+    def key(self, path: str) -> str:
+        """Comparison form: the declared template's `as_template`, else `as_template(path)`."""
+        tpl = self.declared(path)
+        return as_template(tpl if tpl else path.split("#")[0].split("?")[0] or "/")
+
