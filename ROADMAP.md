@@ -326,7 +326,7 @@ Scenario generation also stopped being coverage-blind:
 - **Plugin-cache-safe layout** — `SKILL.md` moved to `skills/web-qa/`, every command
   referenced as `${CLAUDE_PLUGIN_ROOT}/bin/web-qa-*` with a git-clone fallback, so
   plugin installs resolve tooling deterministically (no reliance on `bin/` being on PATH)
-- **Sister skill published** — [tg-qa](https://codeberg.org/c-c0rtex/tg-qa) (autonomous
+- **Sister skill published** — [tg-qa](https://github.com/c-c0rtex/tg-qa) (autonomous
   Telegram-bot QA) joins the `c-c0rtex` marketplace alongside web-qa
 
 ## Shipped — v0.3.5 (reliability & adoption)
@@ -350,7 +350,7 @@ Scenario generation also stopped being coverage-blind:
 
 ## Shipped — v0.3.4 (dogfooding on RealWorld)
 
-Everything here came out of building [web-qa-demo](https://codeberg.org/c-c0rtex/web-qa-demo)
+Everything here came out of building [web-qa-demo](https://github.com/c-c0rtex/web-qa-demo)
 against a real RealWorld stack:
 
 - **Config-driven auth adapter** — `auth_login_path` / `auth_login_body` /

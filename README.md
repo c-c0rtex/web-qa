@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://ci.codeberg.org/api/badges/c-c0rtex/web-qa/status.svg" alt="CI">
+  <img src="https://img.shields.io/github/actions/workflow/status/c-c0rtex/web-qa/ci.yml?style=flat-square&label=CI" alt="CI">
   <img src="https://img.shields.io/badge/version-0.4.8-blue?style=flat-square" alt="Version 0.4.8">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
@@ -41,7 +41,7 @@ Plus a **deploy gate**: `web-qa-matrix` inventories *all* tests in a project (sc
 web-qa-matrix --alias my-app && ./deploy.sh
 ```
 
-Want to see the output before installing? **[web-qa-demo](https://codeberg.org/c-c0rtex/web-qa-demo)** runs the full pipeline against a real [RealWorld](https://github.com/gothinkster/realworld) stack — the crawled map, generated scenarios and specs, the deploy-gate matrix, and the real bugs it found in upstream code are all committed there.
+Want to see the output before installing? **[web-qa-demo](https://github.com/c-c0rtex/web-qa-demo)** runs the full pipeline against a real [RealWorld](https://github.com/gothinkster/realworld) stack — the crawled map, generated scenarios and specs, the deploy-gate matrix, and the real bugs it found in upstream code are all committed there.
 
 ## Requirements
 
@@ -54,7 +54,7 @@ Want to see the output before installing? **[web-qa-demo](https://codeberg.org/c
 As a Claude Code plugin (from inside Claude Code):
 
 ```
-/plugin marketplace add https://codeberg.org/c-c0rtex/web-qa.git
+/plugin marketplace add c-c0rtex/web-qa
 /plugin install web-qa@c-c0rtex
 ```
 
@@ -63,7 +63,7 @@ Then ask your agent to *"set up web-qa"* — on first use it runs `install.sh` (
 Or as a plain skill:
 
 ```bash
-git clone https://codeberg.org/c-c0rtex/web-qa ~/.claude/skills/web-qa
+git clone https://github.com/c-c0rtex/web-qa ~/.claude/skills/web-qa
 cd ~/.claude/skills/web-qa
 ./install.sh          # uv sync + chromium + projects.json from example
 ```
@@ -140,7 +140,7 @@ See [ROADMAP.md](ROADMAP.md) — next: cross-agent support (`WEBQA_LLM_CMD` for 
 
 ## Attribution
 
-MIT-licensed. If you use this project or build on it, a link back to [codeberg.org/c-c0rtex/web-qa](https://codeberg.org/c-c0rtex/web-qa) is appreciated — it's the only thing asked for.
+MIT-licensed. If you use this project or build on it, a link back to [github.com/c-c0rtex/web-qa](https://github.com/c-c0rtex/web-qa) is appreciated — it's the only thing asked for.
 
 Generated tests, reports, and app maps produced by this tool are yours, no strings attached.
 
@@ -153,4 +153,4 @@ The four-stage pipeline architecture was inspired by [Playwright's test agents](
 
 ## License
 
-[MIT](LICENSE) © [c-c0rtex](https://codeberg.org/c-c0rtex)
+[MIT](LICENSE) © [c-c0rtex](https://github.com/c-c0rtex)
