@@ -79,7 +79,7 @@ fix when something is missing.
 ```
 <skill root>/                             # shared infrastructure
 ├── skills/web-qa/SKILL.md                # this file (plugin skill layout)
-├── projects.json                         # machine-local registry (gitignored; see projects.example.json)
+├── projects.example.json                 # registry shape; the real one is ~/.config/web-qa/projects.json
 ├── playwright.config.template.ts         # per-project config template
 ├── bin/                                  # thin wrappers over runners/ (uv run)
 │   ├── web-qa-register-project           # onboard a project (+ .web-qa/ scaffold)
@@ -202,7 +202,7 @@ Pin `@playwright/test` to an exact version: every version pins an exact browser 
 ## Workflows (for the agent)
 
 ### Onboarding a project (once)
-1. `web-qa-register-project <alias> --target-url ... --backend-url ...`; put credentials into `projects.json → auth`
+1. `web-qa-register-project <alias> --target-url ... --backend-url ...`; put credentials into `~/.config/web-qa/projects.json → auth`
 2. Make sure the dev server responds
 3. `web-qa-explore --alias <alias>` → review `app.context.md`, fill `auth_login_hint` and other config keys
 4. Specs runner setup (block above)

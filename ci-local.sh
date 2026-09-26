@@ -17,9 +17,8 @@ echo "== lint";        uv run ruff check runners tests
 echo "== unit";        uv run pytest -q
 echo "== integration"; uv run pytest -m integration -q
 echo "== cli smoke"
-[ -f projects.json ] || cp projects.example.json projects.json
-# the registry no longer lives in the skill root — point the runners at the local copy
-export WEBQA_REGISTRY="$PWD/projects.json"
+# the registry no longer lives in the skill root — point the runners at the example, as CI does
+export WEBQA_REGISTRY="$PWD/projects.example.json"
 bin/web-qa-resolve-project --alias my-app > /dev/null
 rc=0; bin/web-qa-matrix --alias my-app --list > /dev/null 2>&1 || rc=$?
 test "$rc" -eq 2

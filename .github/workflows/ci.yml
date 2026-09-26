@@ -40,6 +40,8 @@ jobs:
         run: uv run pytest -m integration -q
 
       - name: CLI smoke
+        env:
+          WEBQA_REGISTRY: ${{ github.workspace }}/projects.example.json
         run: |
           bin/web-qa-resolve-project --alias my-app
           # matrix on the example project must fail cleanly with exit 2 (no tests found)

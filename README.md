@@ -65,14 +65,14 @@ Or as a plain skill:
 ```bash
 git clone https://github.com/c-c0rtex/web-qa ~/.claude/skills/web-qa
 cd ~/.claude/skills/web-qa
-./install.sh          # uv sync + chromium + projects.json from example
+./install.sh          # uv sync + chromium
 ```
 
 Onboard a project:
 
 ```bash
 bin/web-qa-register-project my-app --target-url http://127.0.0.1:3000 --backend-url http://127.0.0.1:8000
-# put credentials into projects.json → "auth": {"email": ..., "password": ...}
+# put credentials into ~/.config/web-qa/projects.json → "auth": {"email": ..., "password": ...}
 bin/web-qa-explore --alias my-app          # crawl → <project>/.web-qa/app.context.md
 ```
 
@@ -117,7 +117,7 @@ All long runs are durable: the matrix report is rewritten after every stage, Pla
 
 ## Configuration
 
-Machine-local registry `projects.json` (aliases, URLs, credentials — never committed) + per-project `.web-qa/config.json` (stack description, auth flow hint for generation, visual masks/excludes, deploy-gate excludes, test-data prefix…). Both documented in [SKILL.md](skills/web-qa/SKILL.md), examples in [projects.example.json](projects.example.json) and [config.example.json](config.example.json).
+Machine-local registry `~/.config/web-qa/projects.json` (aliases, paths, credentials — never committed) + per-project `.web-qa/config.json` (stack description, auth flow hint for generation, visual masks/excludes, deploy-gate excludes, test-data prefix…). Both documented in [SKILL.md](skills/web-qa/SKILL.md), examples in [projects.example.json](projects.example.json) and [config.example.json](config.example.json).
 
 Useful environment variables:
 
