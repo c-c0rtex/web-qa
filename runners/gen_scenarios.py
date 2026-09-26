@@ -26,14 +26,17 @@ from explore import load_project
 from matrix import routes_from_context
 from progress import Progress, emit
 from run_scenarios import classify, declared_type, split_tcs, tc_routes
-from spec_gen import (apply_project_budget, call_claude, llm_spend, load_app_context,
-                      slugify, spend_probe)
+from spec_gen import (LLMTimeout, apply_project_budget, call_claude, llm_spend,
+                      load_app_context, slugify, spend_probe)
 
 # Deciding WHAT to test is judgment work, and it runs exactly once per invocation —
 # unlike spec-gen, which fans a mechanical translation out over every test case. The
 # tier is worth the few cents here; WEBQA_CLAUDE_MODEL still overrides it.
 SCENARIO_MODEL = "opus"
 SCENARIO_EFFORT = "high"
+# A judgment call on opus/high over a 50 KB map; 240 s killed a long task mid-answer.
+# WEBQA_GEN_TIMEOUT overrides, as it does for spec-gen.
+SCENARIO_TIMEOUT = 600
 
 MAX_DIFF_CHARS = 9000
 
@@ -259,7 +262,12 @@ def main() -> int:
               f"{SCENARIO_MODEL}/{SCENARIO_EFFORT} — one call, {len(prompt)} chars of context")
     bar.begin("scenario")
     try:
-        md = call_claude(prompt, timeout=240, model=SCENARIO_MODEL, effort=SCENARIO_EFFORT)
+        md = call_claude(prompt, timeout=int(os.environ.get("WEBQA_GEN_TIMEOUT") or SCENARIO_TIMEOUT),
+                         model=SCENARIO_MODEL, effort=SCENARIO_EFFORT)
+    except LLMTimeout as e:
+        bar.step("scenario", "FAIL")
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        return 1
     finally:
         bar.leave()
     bar.step("scenario", "OK" if md.strip() else "FAIL")

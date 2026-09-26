@@ -28,6 +28,7 @@ from playwright.sync_api import sync_playwright, ConsoleMessage, Response
 from progress import Progress, emit
 
 from entity_ids import backend_client, discover_ids, id_routes, materialize_path  # noqa: F401
+from spec_sigs import is_stale, load_signatures
 from explore import (
     api_login,
     build_storage_state,
@@ -336,7 +337,7 @@ def apply_visual_masks(page, mask_selectors: list[str]) -> None:
         emit("visual", f"mask failed: {e}")
 
 
-def spec_for_tc(webqa: Path, tc_id: str) -> str | None:
+def spec_for_tc(webqa: Path, tc_id: str, tc: dict | None = None) -> str | None:
     """The generated spec that executes this test case, if one exists.
 
     Two shapes, because the file name is `<scenario>__<slug(TC-ID + title)>.spec.ts` and a
@@ -348,6 +349,9 @@ def spec_for_tc(webqa: Path, tc_id: str) -> str | None:
     slug = tc_id.lower()
     specs = webqa / "specs"
     hits = sorted(specs.glob(f"*__{slug}.spec.ts")) + sorted(specs.glob(f"*__{slug}-*.spec.ts"))
+    # a spec generated for another version of this test case does not assert THIS one
+    sigs = load_signatures(specs)
+    hits = [h for h in hits if not is_stale(h.name, tc, sigs)]
     return hits[0].name if hits else None
 
 
@@ -626,7 +630,7 @@ def main() -> int:
                                      baseline_dir, args.update_baseline, args.visual_threshold,
                                      backend_prefixes, route_hints, visual_masks, visual_exclude,
                                      vp_suffix, args.routes, token,
-                                     spec_for_tc(project_path / ".web-qa", tc["id"]),
+                                     spec_for_tc(project_path / ".web-qa", tc["id"], tc),
                                      id_routes(id_discovery))
                 # Network assertion: a 5xx during THIS TC's navigation is a failure signal,
                 # not a footnote (config `network_fail_on`, default ["5xx"] — add "4xx" to

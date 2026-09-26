@@ -40,6 +40,7 @@ from progress import Progress, emit
 from explore import (export_spec_env, load_project, redacted_env, run_fixture_cmd,
                      viewport_entry, viewport_env)
 from spec_gen import orphan_specs
+from spec_sigs import is_stale, load_signatures
 from run_scenarios import split_tcs, extract_paths, classify, tc_roles, DEFAULT_BACKEND_PREFIXES
 
 SKILL = Path(__file__).resolve().parent.parent
@@ -64,6 +65,19 @@ def collect_scenario_tcs(webqa: Path, backend_prefixes: tuple[str, ...]) -> list
                 "paths": fronts, "roles": tc_roles(tc["body"]),
             })
     return rows
+
+
+def stale_specs(webqa: Path) -> set[str]:
+    """Specs whose recorded test-case signature no longer matches that test case."""
+    sigs = load_signatures(webqa / "specs")
+    if not sigs:
+        return set()
+    tcs: dict[tuple[str, str], dict] = {}
+    for md in sorted((webqa / "scenarios").glob("*.md")) if (webqa / "scenarios").is_dir() else []:
+        for tc in split_tcs(md.read_text(encoding="utf-8")):
+            tcs[(md.stem, tc["id"].upper())] = tc
+    return {name for name in sigs
+            if is_stale(name, tcs.get((name.split("__", 1)[0], spec_tc_id(name))), sigs)}
 
 
 RE_SPEC_TC = re.compile(r"__(tc-[a-z]*\d+)", re.IGNORECASE)
@@ -100,7 +114,8 @@ def spec_is_mutating(text: str, tc_kind: str | None) -> bool:
 def collect_specs(webqa: Path, include_adhoc: bool,
                   exclude_globs: list[str] | None = None,
                   tc_kinds: dict[str, str] | None = None,
-                  orphans: set[str] | None = None) -> tuple[list[dict], list[str]]:
+                  orphans: set[str] | None = None,
+                  stale: set[str] | None = None) -> tuple[list[dict], list[str]]:
     """Returns (rows, excluded_names). exclude_globs come from config `gate_exclude` —
     specs for features hidden on prod (feature flags, build-args) don't belong in the gate.
 
@@ -128,6 +143,18 @@ def collect_specs(webqa: Path, include_adhoc: bool,
                 "kind": "orphan", "mutating": mutating, "status": "manual",
                 "skipped_mutating": True,
                 "note": "orphan: no test case defines this spec (web-qa-spec-gen --prune)",
+            })
+            continue
+        if f.name in (stale or set()):
+            # Generated for a different version of this test case — typically a regenerated
+            # scenario set that reused the id. Running it would credit the new test case with
+            # a check it never asked for.
+            rows.append({
+                "source": "spec", "file": f.name, "id": tc_id, "title": f.stem,
+                "kind": "stale", "mutating": mutating, "status": "manual",
+                "skipped_mutating": True,
+                "note": f"stale: generated for a different version of {tc_id} "
+                        f"(web-qa-spec-gen --tc {tc_id} --force)",
             })
             continue
         rows.append({
@@ -616,8 +643,14 @@ def main() -> int:
     orphans = set(orphan_specs(webqa))
     if orphans:
         emit("matrix", f"{len(orphans)} orphan spec(s) reported and NOT run (no test case defines them): {', '.join(sorted(orphans)[:5])}{'…' if len(orphans) > 5 else ''}")
+    stale = stale_specs(webqa)
+    if stale:
+        emit("matrix", f"{len(stale)} stale spec(s) reported and NOT run (generated for another "
+                       f"version of their test case): {', '.join(sorted(stale)[:5])}"
+                       f"{'…' if len(stale) > 5 else ''}")
     spec_rows, gate_excluded = collect_specs(webqa, args.include_adhoc,
-                                             proj.get("gate_exclude") or [], tc_kinds, orphans)
+                                             proj.get("gate_exclude") or [], tc_kinds, orphans,
+                                             stale)
     for r in spec_rows:
         r["role"] = "-"
         if args.no_mutations and r.get("mutating"):

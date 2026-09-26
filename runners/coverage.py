@@ -22,9 +22,18 @@ CONTROL_ROLES = ("button", "tab", "checkbox", "combobox", "switch", "menuitem", 
                  "menuitemcheckbox", "slider")
 
 RE_ARIA_ENTRY = re.compile(r"^### `([^`]+)`.*?\n```yaml\n(.*?)\n```", re.S | re.M)
-RE_CONTROL = re.compile(r'^\s*-\s+(?:%s)\s+"([^"]+)"' % "|".join(CONTROL_ROLES), re.M)
-# A run of six or more digits is a timestamp or an id: the control's name is data, not UI.
-RE_DATA_NAME = re.compile(r"\d{6,}")
+# One line only: `[^"]+` ran across newlines, so a snapshot clipped inside a name swallowed
+# everything up to the next quote — "# …(snapshot clipped) # --- dialog opened by …" was
+# reported as a button nobody tests.
+RE_CONTROL = re.compile(r'^\s*-\s+(?:%s)\s+"([^"\n]+)"' % "|".join(CONTROL_ROLES), re.M)
+# A name carrying a date, a year, an id or a quantity is DATA the control shows, not the
+# control: a calendar's «<employee>, 01.09.2026» cells, an order sheet's «9.600 kg» and
+# «c004». Six digits in a row caught only timestamps; these made up two thirds of a real
+# map's "untested controls", and --cover-gaps spent its one call chasing them.
+RE_DATA_NAME = re.compile(r"\d{3,}|\d[.,]\d")
+# Longer than this is prose — a mail preview, a drag hint — not a caption. On a stand with
+# production data it is also somebody's correspondence, headed for an LLM prompt.
+MAX_CONTROL_NAME = 60
 
 CHROME_SHARE = 0.5     # a name on more than half the routes is layout, not a feature
 
@@ -47,7 +56,8 @@ def controls_by_route(md: str) -> dict[str, set[str]]:
     for m in RE_ARIA_ENTRY.finditer(aria_section(md)):
         route, body = m.group(1), m.group(2)
         names = {normalize(n) for n in RE_CONTROL.findall(body)}
-        out[route] = {n for n in names if n and not RE_DATA_NAME.search(n)}
+        out[route] = {n for n in names
+                      if n and len(n) <= MAX_CONTROL_NAME and not RE_DATA_NAME.search(n)}
     return out
 
 

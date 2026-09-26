@@ -2757,3 +2757,95 @@ def test_a_heal_that_copies_a_url_from_the_error_is_not_written():
     from maintain import heal_one
     src = inspect.getsource(heal_one)
     assert src.index("stand_values_in(code, proj)") < src.index("out_file.write_text(code")
+
+def test_claude_never_reads_the_callers_stdin():
+    """`claude -p` appends a piped stdin to the prompt: in a `while read` loop the rest of
+    the loop's input went to the model with the first task, and the loop stopped there."""
+    import inspect
+    from spec_gen import call_claude
+    assert "stdin=subprocess.DEVNULL" in inspect.getsource(call_claude)
+
+def test_a_timed_out_call_is_a_clean_error_that_admits_its_spend_is_unmetered(monkeypatch):
+    """generate hardcoded 240 s, ignored WEBQA_GEN_TIMEOUT, and died on a traceback; the
+    killed call's cost never reached the meter, and nothing said so."""
+    import subprocess
+    import spec_gen
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=k.get("timeout"))
+    monkeypatch.setattr(spec_gen.subprocess, "run", boom)
+    monkeypatch.setattr(spec_gen, "_check_budget", lambda: None)
+    try:
+        spec_gen.call_claude("x", timeout=7)
+    except spec_gen.LLMTimeout as e:
+        assert "7s" in str(e) and "not in the budget meter" in str(e)
+    else:
+        raise AssertionError("no LLMTimeout")
+    import inspect
+    import gen_scenarios
+    src = inspect.getsource(gen_scenarios.main)
+    assert "timeout=240" not in src and "WEBQA_GEN_TIMEOUT" in src and "except LLMTimeout" in src
+
+def test_control_gaps_are_controls_not_the_data_they_show():
+    """Two thirds of a real map's "untested controls" were calendar cells, quantities, box
+    codes and mail previews; --cover-gaps spent its call on them."""
+    from coverage import controls_by_route
+    snap = ('## ARIA snapshots\n\n### `/calendar`\n```yaml\n'
+            '- button "Neue Aufgabe"\n- button "Jane Roe, 01.09.2026"\n- button "9.600 kg"\n'
+            '- button "c004"\n- tab "Export"\n'
+            '- button "Hello team, as discussed on Monday the invoice for the second batch is attached"\n'
+            '- button "Truncated caption\n# …(snapshot clipped)\n- dialog "x"\n```\n')
+    assert controls_by_route(snap)["/calendar"] == {"neue aufgabe", "export"}
+
+def test_narration_before_the_code_is_not_a_parse_failure():
+    from spec_gen import postprocess_spec
+    out = postprocess_spec("Let me check the form logic first.\n```ts\nimport { test } from '@playwright/test';\n"
+                           "test('x', async () => {});\n```\n")
+    assert out.startswith("import { test }") and "```" not in out
+
+def test_the_probe_retry_is_extra_and_a_parsed_spec_is_never_failed(tmp_path, monkeypatch):
+    """parse retry, then a valid spec with probe feedback: the loop ended WITHOUT the probe
+    retry it announced and returned the first attempt's parse error — a valid spec on disk
+    marked FAILED, uncached, paid for again."""
+    import locator_probe
+    import spec_gen
+    good = "import { test } from '@playwright/test';\ntest('TC-1: x', async ({ page }) => { await page.goto('/x'); });\n"
+    replies = iter(["I will look at the code first.", good, "still thinking…"])
+    calls = []
+    def fake_claude(prompt, **k):
+        calls.append(prompt)
+        return next(replies)
+    monkeypatch.setattr(spec_gen, "call_claude", fake_claude)
+    monkeypatch.setattr(spec_gen, "validate_spec",
+                        lambda webqa, out: None if out.read_text().startswith("import") else "SyntaxError")
+    monkeypatch.setattr(locator_probe, "probe_spec", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(locator_probe, "probe_feedback", lambda r: "- getByRole('button', {name: 'Nope'}): 0 matches")
+    out = tmp_path / "x.spec.ts"
+    key, err, warning = spec_gen.gen_one("s::TC-1", "PROMPT", out, tmp_path, PROJ, live_probe=True)
+    assert len(calls) == 3                         # the announced probe retry really happens
+    assert err is None and "Nope" in warning       # accepted with the probe's warning
+    assert out.read_text() == good                 # the broken third answer did not survive
+
+def test_a_spec_for_an_older_version_of_its_test_case_is_stale(tmp_path):
+    """A non-latin title slugifies to nothing, so the file name carries the id alone: after the
+    scenarios were regenerated, a spec written for one case ran — and was credited — as the
+    spec of a new case that inherited its id. The orphan rule could not see it."""
+    from matrix import collect_specs, stale_specs
+    from run_scenarios import spec_for_tc
+    from spec_sigs import record_signatures, tc_signature
+    webqa = tmp_path / ".web-qa"
+    (webqa / "scenarios").mkdir(parents=True)
+    (webqa / "specs").mkdir()
+    old = {"id": "TC-S3", "title": "Итоговый объём", "body": "**Type:** passive\nold"}
+    new_md = "## TC-S3 — Смена стадии\n**Type:** passive\nnew body\n"
+    (webqa / "scenarios" / "ship.md").write_text(new_md, encoding="utf-8")
+    (webqa / "specs" / "ship__tc-s3.spec.ts").write_text("test('x', () => {});")
+    record_signatures(webqa / "specs", {"ship__tc-s3.spec.ts": tc_signature(old)})
+    assert stale_specs(webqa) == {"ship__tc-s3.spec.ts"}
+    rows, _ = collect_specs(webqa, False, stale=stale_specs(webqa))
+    assert rows[0]["kind"] == "stale" and rows[0]["skipped_mutating"]
+    from run_scenarios import split_tcs
+    current = split_tcs(new_md)[0]
+    assert spec_for_tc(webqa, "TC-S3", current) is None          # the passive check stands
+    record_signatures(webqa / "specs", {"ship__tc-s3.spec.ts": tc_signature(current)})
+    assert stale_specs(webqa) == set()
+    assert spec_for_tc(webqa, "TC-S3", current) == "ship__tc-s3.spec.ts"

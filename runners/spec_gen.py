@@ -31,6 +31,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from explore import credential_vars, load_project, registry_secrets, resolve_credentials
+from spec_sigs import load_signatures, record_signatures, tc_signature
 from progress import Progress, emit
 from run_scenarios import (DEFAULT_BACKEND_PREFIXES, declared_type, extract_paths, norm_route,
                            split_tcs, tc_roles, tc_routes)
@@ -404,6 +405,11 @@ def is_mutating(tc: dict) -> bool:
     return declared_type(tc.get("body", "")) != "passive"
 
 
+class LLMTimeout(RuntimeError):
+    """`claude -p` ran past its timeout and was killed. Its spend is NOT in the meter: the
+    CLI reports `total_cost_usd` only in the JSON it prints on exit, and it never exited."""
+
+
 class LLMBudgetExceeded(RuntimeError):
     """Raised INSTEAD of spending past the ceiling. Nothing reaches the model."""
 
@@ -554,7 +560,16 @@ def call_claude(prompt: str, timeout: int | None = None, *, model: str | None = 
     _check_budget()
     timeout = timeout or int(os.environ.get("WEBQA_GEN_TIMEOUT", "300"))
     cmd = claude_cmd(prompt, model=model, effort=effort, tools=tools)
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # stdin=DEVNULL: `claude -p` APPENDS a piped stdin to the prompt. Under a `while read`
+    # loop, a CI step or an agent harness, whatever sat on stdin went to the model with the
+    # task — the rest of the loop's input vanished into the first call — and an open pipe
+    # that never closes leaves the call waiting for EOF.
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise LLMTimeout(f"claude -p timed out after {timeout}s and was killed — whatever it "
+                         f"spent is not in the budget meter; raise WEBQA_GEN_TIMEOUT") from None
     if proc.returncode != 0:
         # The CLI reports usage-limit exhaustion on stdout, not stderr. Reading only
         # stderr turned "5-hour limit reached" into a blank, unactionable error.
@@ -564,8 +579,18 @@ def call_claude(prompt: str, timeout: int | None = None, *, model: str | None = 
 
 
 def postprocess_spec(code: str) -> str:
-    """Mechanical safety net over LLM output — the prompt forbids networkidle, but if it
-    slips through anyway, downgrade it to a state that actually settles."""
+    """Mechanical safety net over LLM output.
+
+    - the prompt forbids networkidle; if it slips through, downgrade it to a state that
+      actually settles
+    - a model that narrates before the code («let me check the form's logic first…») had
+      its whole answer rejected by the parser and paid for a retry, although the code after
+      the narration was fine. Anything before the first `import`, and a closing markdown
+      fence, is dropped"""
+    m = re.search(r"^import\s", code, re.MULTILINE)
+    if m and m.start() > 0:
+        code = code[m.start():]
+    code = re.sub(r"\n```[ \t]*\s*$", "\n", code)
     return code.replace("'networkidle'", "'domcontentloaded'").replace('"networkidle"', '"domcontentloaded"')
 
 
@@ -831,6 +856,7 @@ def prune_orphan_specs(webqa: Path, names: list[str]) -> list[str]:
             if p.is_file():
                 p.unlink()
                 removed.append(p.name)
+    record_signatures(webqa / "specs", {name: None for name in names})
     return removed
 
 
@@ -972,7 +998,15 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
     attempt_prompt = prompt
     last_err: str | None = None
     probe_retried = False
-    for _ in range(GEN_ATTEMPTS):
+    # The probe's retry comes ON TOP of the parse budget. It used to share it: after a parse
+    # retry, a probe retry ended the loop without the call it announced, and gen_one returned
+    # the FIRST attempt's parse error — a valid spec on disk marked FAILED, uncached, and
+    # paid for again on the next run.
+    budget = GEN_ATTEMPTS
+    good: tuple[str, str | None] | None = None      # (code, probe warning) of a parsed spec
+    attempt = 0
+    while attempt < budget:
+        attempt += 1
         code = call_claude(attempt_prompt)
         if not code.strip():
             last_err = "empty output from claude"
@@ -985,7 +1019,8 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
             attempt_prompt = prompt + LEAK_RETRY_SUFFIX.format(found=", ".join(leaks))
             _note(f"RETRY {tc_key}: spec hardcodes {', '.join(leaks)} (costs another full call)")
             continue
-        out_path.write_text(postprocess_spec(code), encoding="utf-8")
+        code = postprocess_spec(code)
+        out_path.write_text(code, encoding="utf-8")
         parse_err = validate_spec(webqa, out_path)
         if parse_err is not None:
             last_err = f"playwright --list rejected spec: {parse_err}"
@@ -997,11 +1032,18 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
             fb = probe_feedback(probe_spec(out_path, proj, role))
         if fb and not probe_retried:
             probe_retried = True
+            good = (code, fb)
+            budget += 1
             attempt_prompt = prompt + PROBE_RETRY_SUFFIX.format(feedback=fb)
             _note(f"RETRY {tc_key}: locators missing on the entry page "
                   f"(costs another full call)")
             continue
         return tc_key, None, fb
+    if good is not None:
+        # the probe's retry failed to parse (or leaked); the spec it was meant to improve
+        # parsed — keep that one, with the probe's warning, rather than fail the test case
+        out_path.write_text(good[0], encoding="utf-8")
+        return tc_key, None, good[1]
     return tc_key, last_err, None
 
 
@@ -1052,6 +1094,9 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                "probe_warnings": [], "skipped_missing_role": [], "skipped_over_budget": []}
     jobs: list[tuple[str, str, Path, str, str | None]] = []  # (tc_key, prompt, out_path, body_hash, role)
 
+    sig_by_key: dict[str, str] = {}
+    known_sigs = load_signatures(specs_dir)
+    bootstrap: dict[str, str] = {}
     for md in md_files:
         scenario_stem = md.stem
         tcs = split_tcs(md.read_text(encoding="utf-8"))
@@ -1074,10 +1119,15 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                     continue
             email_var, password_var = credential_vars(declared[0] if declared else None)
             body_hash = tc_hash(tc.get("body", "") + env_hash + email_var)
+            out_path = specs_dir / spec_file_name(scenario_stem, tc_id, tc.get("title", ""))
+            sig_by_key[tc_key] = tc_signature(tc)
             if not force and cache.get(tc_key) == body_hash:
                 summary["skipped_cached"].append(tc_key)
+                # a cache hit proves the spec was made from THIS test case body: record it
+                # for specs older than signatures, so matrix can tell them from stale ones
+                if out_path.name not in known_sigs and out_path.is_file():
+                    bootstrap[out_path.name] = sig_by_key[tc_key]
                 continue
-            out_path = specs_dir / spec_file_name(scenario_stem, tc_id, tc.get("title", ""))
             prompt = PROMPT_TEMPLATE.format(
                 stack=stack,
                 email_var=email_var,
@@ -1094,6 +1144,8 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 tc_body=f"## {tc_id} — {tc.get('name', '')}\n\n{tc.get('body', '')}",
             )
             jobs.append((tc_key, prompt, out_path, body_hash, declared[0] if declared else None))
+
+    record_signatures(specs_dir, bootstrap)
 
     if summary["skipped_missing_role"]:
         gaps = ", ".join(f"{r['tc']} (role {r['role']!r})" for r in summary["skipped_missing_role"])
@@ -1144,6 +1196,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                     bar.note(f"PROBE {tc_key}: unresolved locators remain\n{warning}")
                 if err is None:
                     cache[tc_key] = hash_by_key[tc_key]
+                    record_signatures(specs_dir, {out_path.name: sig_by_key[tc_key]})
                     # Persist NOW, not after the loop. A run that generates 70 specs and is
                     # interrupted at the 69th used to lose every cache entry with it — the
                     # specs stayed on disk, but the next invocation paid for all of them
