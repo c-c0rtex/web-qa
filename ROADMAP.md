@@ -4,7 +4,50 @@ web-qa is an autonomous web-app QA skill for AI coding agents. This is a living
 document describing current direction — not a set of promises. Issues and
 feedback are welcome and will shape what moves up.
 
-_Last updated: 2026-07_
+_Last updated: 2026-09_
+
+## Shipped — v0.4.9 (a suite that tells the truth about itself)
+
+A full cycle — crawl, generate, spec-gen, matrix, triage, maintain — was run from scratch on a
+real business application. Triage of every failure found **no
+application bug**: 49 passive failures were the runners' oracles, 45 spec failures were 37
+spec defects, 5 test-case defects and 3 environment issues. Everything below came out of that.
+
+**Specs carry no stand.** spec-gen pasted the stand's URLs and the registry's password into
+the prompt and the model copied both into every file. Specs now navigate relative to
+`baseURL` and read `WEBQA_BASE_URL`, `WEBQA_BACKEND_URL`, `WEBQA_EMAIL`/`_PASSWORD` and
+`WEBQA_ROLE_<NAME>_*`, exported by matrix / run-specs / maintain (a caller's value wins); an
+output that hardcodes any of them is rejected; `doctor` flags old specs that still do.
+
+**One browser locale.** The crawler sent no Accept-Language and saw one UI language;
+Playwright Test sent en-US and saw another. Config `locale` now drives every context.
+
+**The crawler maps what the app declares.** Parametrized routes are opened with real ids
+from `id_discovery` (with an optional `route`); a generic `{id}` gets the id its route names,
+never the first one found; slugs count as instances of their template; `/_next/…` is not a
+page; the page budget covers every mined route; the click pass has a time budget and also
+records inline panels; nested request bodies show their required fields.
+
+**Oracles stop failing what they cannot judge.** The passive word count is informational when
+the Expected prose and the page use different alphabets, when a restricted role runs a case
+it does not declare, and it judges a multi-page case over all its pages; a probed 403 the
+role was meant to get, a redirect, a 422 from a parameterless probe and `/x/<id>` are not
+failures. Passive stage on the same app: 49 failures → 0.
+
+**Generation and healing stop hiding their own failures.** A spec that skips when a setup
+call fails is rejected (26 did); a heal counts only if the spec then passes, and a heal that
+adds `test.skip` is refused; a parse retry followed by a probe retry no longer fails a valid
+spec; a stale spec (generated for another version of its test case) is named and not run.
+
+**Spend you can stop.** `claude -p` no longer reads the caller's stdin, runs in its own process
+group (killed whole on timeout and on SIGTERM), and a stopping run starts no new call; the
+live probe retries only on entry-state misses (34 of 35 retries had been wasted); the spec
+cache keys on the test case's own prompt.
+
+**Still open.** One-shot generation and one-shot healing plateau on complex UIs: after two full
+cycles 15 of 54 specs pass, and 2 of 38 heals were verified. The next step is an iterative
+generate → run → read the failure snapshot → fix loop per spec. Also open: heals still time
+out at 600 s on a frontier model; traces keep the login request; a data-blind map fingerprint.
 
 ## Shipped — v0.4.8 (a long run should say where it is, and a weak oracle should not veto a strong one)
 
