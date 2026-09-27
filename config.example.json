@@ -28,6 +28,8 @@
     { "path": "/", "keywords": ["dashboard", "kpi"] }
   ],
 
+  "locale": "en-US",
+
   "id_discovery": [
     { "endpoint": "/orders", "key": "order" }
   ],
