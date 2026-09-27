@@ -615,7 +615,19 @@ def _reap_live_calls(*_args) -> None:
         _kill_group(pgid)
 
 
+_STOPPING = threading.Event()   # set on SIGTERM: no new model call may start
+
+
+class LLMStopped(RuntimeError):
+    """web-qa is being stopped; a queued job must not start a model call."""
+
+
 def _on_sigterm(signum, _frame) -> None:
+    # Killing the live calls was not enough: SystemExit unwinds `with ThreadPoolExecutor`,
+    # whose shutdown WAITS for the whole queue — the workers picked up the next job and
+    # started new calls while the process was "stopping". The flag makes every queued job
+    # fail fast instead.
+    _STOPPING.set()
     _reap_live_calls()
     raise SystemExit(128 + signum)
 
@@ -647,6 +659,8 @@ def call_claude(prompt: str, timeout: int | None = None, *, model: str | None = 
     WEBQA_CLAUDE_TOOLS, WEBQA_MAX_USD, WEBQA_GEN_TIMEOUT (seconds, default 300 — complex
     multi-step TCs did not fit the old 180s and died silently).
     """
+    if _STOPPING.is_set():
+        raise LLMStopped("web-qa is stopping — call not started")
     _check_budget()
     timeout = timeout or int(os.environ.get("WEBQA_GEN_TIMEOUT", "300"))
     cmd = claude_cmd(prompt, model=model, effort=effort, tools=tools)
@@ -661,6 +675,8 @@ def call_claude(prompt: str, timeout: int | None = None, *, model: str | None = 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL, text=True, start_new_session=True)
     _LIVE_GROUPS.add(proc.pid)
+    if _STOPPING.is_set():            # SIGTERM landed between the check above and the spawn
+        _kill_group(proc.pid)
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:

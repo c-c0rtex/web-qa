@@ -3017,3 +3017,21 @@ def test_a_failed_setup_call_is_not_allowed_to_become_a_skip():
     assert RE_SKIP_ON_RESPONSE.search("if (!created.ok()) { test.skip(true, 'could not create'); }")
     assert not RE_SKIP_ON_RESPONSE.search("test.skip(!factories.length, 'no factories on the stand');")
     assert "A FAILED SETUP IS A FAILURE, NEVER A SKIP" in PROMPT_TEMPLATE
+
+def test_a_stopping_run_starts_no_new_model_call(monkeypatch):
+    """SIGTERM killed the live calls, but the pool's shutdown waited for its queue and the
+    workers started new ones — a "stopped" run kept spending."""
+    import spec_gen
+    started = []
+    monkeypatch.setattr(spec_gen.subprocess, "Popen", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(spec_gen, "_check_budget", lambda: None)
+    spec_gen._STOPPING.set()
+    try:
+        spec_gen.call_claude("x")
+    except spec_gen.LLMStopped:
+        pass
+    else:
+        raise AssertionError("call started while stopping")
+    finally:
+        spec_gen._STOPPING.clear()
+    assert started == []
