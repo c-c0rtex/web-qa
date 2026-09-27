@@ -2515,18 +2515,23 @@ def test_an_unresolved_path_template_is_not_probed():
 def test_a_spec_backed_tc_is_not_failed_by_the_keyword_heuristic():
     """The check counts how many words of the Expected prose appear on the page. The better a
     test case gets ("the row count equals GET /orders"), the fewer of its words a page shows."""
-    import inspect
-    from run_scenarios import run_passive_tc
-    src = inspect.getsource(run_passive_tc)
-    assert "asserted_by_spec" in src
-    assert "informational: asserted by" in src
-    # visual regressions and 4xx still fail, spec or no spec
-    assert src.count('overall = "fail"') >= 3
+    from run_scenarios import judge_keywords
+    exp = ["Totals reconcile with positions", "Invoice amount equals sum"]
+    notes: list[str] = []
+    assert judge_keywords(exp, "orders page", ["/orders"], notes, "pass", "o.spec.ts", None) == "pass"
+    assert "informational: asserted by" in notes[-1]
+    assert judge_keywords(exp, "orders page", ["/orders"], [], "pass", None, None) == "fail"
 
-
-# ---------------------------------------------------------------------------
-# `Buffer.from('%PDF-1.4 test content')` is not a PDF; an importer rejects it.
-# ---------------------------------------------------------------------------
+def test_keywords_are_judged_over_the_whole_flow_and_not_under_foreign_roles():
+    """A two-page case failed on its first page, whose own bullet was there; a role the case
+    does not declare saw an access notice where the content would be."""
+    from run_scenarios import judge_keywords
+    exp = ["Analytics heading", "Journal table"]
+    both = "analytics heading … journal table"
+    assert judge_keywords(exp, both, ["/reports", "/audit"], [], "pass", None, None) == "pass"
+    notes: list[str] = []
+    assert judge_keywords(exp, "no access", ["/mail"], notes, "pass", None, "viewer") == "pass"
+    assert "role viewer" in notes[-1]
 
 def test_fixtures_section_lists_what_a_spec_may_upload(tmp_path):
     from spec_gen import fixtures_section

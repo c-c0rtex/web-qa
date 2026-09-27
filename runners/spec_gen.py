@@ -1125,10 +1125,6 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                              proj.get("auth_login_hint") or DEFAULT_AUTH_HINT)
     resolve_credentials(proj, None, None)     # fail fast: no default account → no specs
     backend_prefixes = tuple(proj.get("backend_prefixes") or DEFAULT_BACKEND_PREFIXES)
-    # Per-TC below (ARIA sliced to the routes that TC visits). The FULL map still keys the
-    # cache: a re-crawl that changes any route must invalidate every spec, not just the
-    # ones whose own slice moved.
-    app_map_digest = app_map_fingerprint(proj_dir)
     seed = load_seed(proj_dir)
     seed_section = seed_prompt_section(seed)
     test_timeout_ms = read_test_timeout(webqa)
@@ -1136,11 +1132,6 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
     a11y_facts = a11y_section(webqa)
     frontend_dir = proj_dir / proj["frontend_dir"] if proj.get("frontend_dir") else proj_dir
     dnd_section = dnd_recipe_section(detect_dnd_library(frontend_dir))
-    # Cache key covers everything that shapes the output: TC body + template + app map + seed.
-    # Not the stand's URLs or passwords: specs read those from the environment, so moving
-    # to another stand or rotating a password must not regenerate (and re-pay for) a suite.
-    env_hash = tc_hash(PROMPT_TEMPLATE + app_map_digest + seed + auth_login_hint
-                       + dnd_section + str(test_timeout_ms) + fixture_list + a11y_facts)
 
     md_files = sorted(scenarios_dir.glob("*.md"))
     if not md_files:
@@ -1176,16 +1167,8 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                     summary["skipped_missing_role"].append({"tc": tc_key, "role": declared[0]})
                     continue
             email_var, password_var = credential_vars(declared[0] if declared else None)
-            body_hash = tc_hash(tc.get("body", "") + env_hash + email_var)
             out_path = specs_dir / spec_file_name(scenario_stem, tc_id, tc.get("title", ""))
             sig_by_key[tc_key] = tc_signature(tc)
-            if not force and cache.get(tc_key) == body_hash:
-                summary["skipped_cached"].append(tc_key)
-                # a cache hit proves the spec was made from THIS test case body: record it
-                # for specs older than signatures, so matrix can tell them from stale ones
-                if out_path.name not in known_sigs and out_path.is_file():
-                    bootstrap[out_path.name] = sig_by_key[tc_key]
-                continue
             prompt = PROMPT_TEMPLATE.format(
                 stack=stack,
                 email_var=email_var,
@@ -1201,6 +1184,20 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
                 dnd_section=dnd_section,
                 tc_body=f"## {tc_id} — {tc.get('name', '')}\n\n{tc.get('body', '')}",
             )
+            # The cache key is the prompt itself: everything that shapes the output, and only
+            # this test case's slice of the map. Keying on the WHOLE map meant a re-crawl after
+            # a mutating run — new rows in some table's snapshot — re-paid for the entire suite.
+            # (Sample-derived titles in the Routes table are in every slice, so a changed sample
+            # still invalidates broadly; a data-blind map fingerprint is the remaining step.)
+            # Not the stand's URLs or passwords: specs read those from the environment.
+            body_hash = tc_hash(prompt)
+            if not force and cache.get(tc_key) == body_hash:
+                summary["skipped_cached"].append(tc_key)
+                # a cache hit proves the spec was made from THIS test case body: record it
+                # for specs older than signatures, so matrix can tell them from stale ones
+                if out_path.name not in known_sigs and out_path.is_file():
+                    bootstrap[out_path.name] = sig_by_key[tc_key]
+                continue
             jobs.append((tc_key, prompt, out_path, body_hash, declared[0] if declared else None))
 
     record_signatures(specs_dir, bootstrap)

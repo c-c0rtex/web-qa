@@ -344,6 +344,44 @@ def apply_visual_masks(page, mask_selectors: list[str]) -> None:
         emit("visual", f"mask failed: {e}")
 
 
+def judge_keywords(expected: list, text: str, paths: list[str], notes: list[str], overall: str,
+                   asserted_by_spec: str | None, run_role: str | None) -> str:
+    """The weakest oracle: how many words of the Expected prose the visited pages show.
+
+    It never vetoes a stronger one, and never judges what it cannot read:
+      - a spec asserting the same test case makes the count a note;
+      - Expected in one alphabet and the pages in another can never match;
+      - a run under a role the test case does not declare cannot know what that role should
+        see (a page the role may not open shows an access notice, not the content)."""
+    hit_count = checkable = 0
+    for kw in expected:
+        terms = keyword_to_search_terms(kw)
+        if not terms:
+            continue
+        checkable += 1
+        if any(t in text for t in terms):
+            hit_count += 1
+    where = ", ".join(paths)
+    notes.append(f"visible text of {where} → {hit_count}/{checkable} expected matched")
+    if not checkable or hit_count / checkable >= 0.3:
+        return overall
+    kw_script = dominant_script(" ".join(" ".join(keyword_to_search_terms(k)) for k in expected))
+    page_script = dominant_script(text)
+    low = f"  only {hit_count}/{checkable} expected-keywords visible on {where}"
+    if asserted_by_spec:
+        notes.append(f"{low} — informational: asserted by `specs/{asserted_by_spec}`")
+    elif kw_script and page_script and kw_script != page_script:
+        notes.append(f"{low} — informational: Expected is {kw_script}, the page is {page_script}; "
+                     f"a word count cannot judge across languages")
+    elif run_role:
+        notes.append(f"{low} — informational: run as role {run_role}, which this test case does "
+                     f"not declare")
+    else:
+        notes.append(f"{low} (<30%)")
+        return "fail"
+    return overall
+
+
 def dominant_script(text: str) -> str | None:
     """The alphabet most letters of `text` are written in: latin, cyrillic, cjk — or None."""
     counts = {"latin": len(re.findall(r"[a-zà-ÿß]", text, re.I)),
@@ -414,6 +452,7 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
     a11y_violations: list[dict] = []
     visual_results: list[dict] = []
     probed = 0
+    page_texts: list[str] = []
 
     # Frontend
     for path in fronts[:3]:
@@ -484,42 +523,20 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
                 if criticals:
                     a11y_violations.extend([{**v, "path": path} for v in criticals])
 
-            # Keyword matching against VISIBLE text only (markup/JSON in scripts doesn't count)
-            if expected:
-                hit_count = 0
-                checkable = 0
-                for kw in expected:
-                    terms = keyword_to_search_terms(kw)
-                    if not terms:
-                        continue
-                    checkable += 1
-                    if any(t in visible_text for t in terms):
-                        hit_count += 1
-                notes.append(f"GOTO {path} → {hit_count}/{checkable} expected matched (visible text)")
-                # A weak oracle must never veto a strong one. This check counts how many words
-                # of the Expected prose appear on the page. The better a test case gets — "the
-                # row count equals the number of live orders per GET /orders" — the fewer of
-                # its words a page can possibly show. Once a spec asserts the same test case
-                # with real assertions, the keyword score is a smoke signal, not a verdict.
-                if checkable and hit_count / checkable < 0.3:
-                    kw_script = dominant_script(" ".join(" ".join(keyword_to_search_terms(k)) for k in expected))
-                    page_script = dominant_script(visible_text)
-                    if kw_script and page_script and kw_script != page_script:
-                        # Expected prose in one alphabet, the page in another (test cases in the
-                        # team's language, UI in the users'): no word can ever match, and 44 of
-                        # 49 passive "failures" in one run were this.
-                        notes.append(f"  only {hit_count}/{checkable} expected-keywords visible on "
-                                     f"{path} — informational: Expected is {kw_script}, the page is "
-                                     f"{page_script}; a word count cannot judge across languages")
-                    elif asserted_by_spec:
-                        notes.append(f"  only {hit_count}/{checkable} expected-keywords visible on "
-                                     f"{path} — informational: asserted by `specs/{asserted_by_spec}`")
-                    else:
-                        overall = "fail"
-                        notes.append(f"  only {hit_count}/{checkable} expected-keywords visible on {path} (<30%)")
+            # Keyword matching against VISIBLE text only (markup/JSON in scripts doesn't count).
+            # Collected here, judged once after the loop: a test case's Expected describes its
+            # WHOLE flow, and scoring all of it against each page failed a multi-page case on
+            # the first page, whose own bullet was there.
+            page_texts.append(visible_text)
         except Exception as e:
             overall = "error"
             notes.append(f"GOTO {path} → exception: {str(e)[:120]}")
+
+    if expected and page_texts:
+        undeclared = (run_role if run_role and run_role.lower()
+                      not in [r.lower() for r in tc_roles(body)] else None)
+        overall = judge_keywords(expected, " ".join(page_texts), fronts[:3], notes, overall,
+                                 asserted_by_spec, undeclared)
 
     # Backend GETs
     with backend_client(cookies, token) as cli:
@@ -601,6 +618,10 @@ def main() -> int:
         run_fixture_cmd(proj)
 
     email, password = resolve_credentials(proj, args.email, args.password, args.role)
+    # A role whose account IS the default one (admin, typically) is not a restriction: its run
+    # judges content like an unscoped run does. Only a genuinely different account is.
+    default_email = (proj.get("auth") or {}).get("email")
+    restricted_role = args.role if args.role and email != default_email else None
     cookies, user_me, token = api_login(backend, email, password, proj)
     storage = build_storage_state(cookies, target, token, proj)
     ids = discover_ids(backend, cookies, id_discovery, token)
@@ -681,7 +702,7 @@ def main() -> int:
                                      backend_prefixes, route_hints, visual_masks, visual_exclude,
                                      vp_suffix, args.routes, token,
                                      spec_for_tc(project_path / ".web-qa", tc["id"], tc),
-                                     id_routes(id_discovery), args.role)
+                                     id_routes(id_discovery), restricted_role)
                 # Network assertion: a 5xx during THIS TC's navigation is a failure signal,
                 # not a footnote (config `network_fail_on`, default ["5xx"] — add "4xx" to
                 # tighten). Structural, language-agnostic, same as everywhere else.
