@@ -429,6 +429,30 @@ DIALOG_ARIA_MAX = 8000
 ARIA_SHRINK_RATIO = 0.5
 
 
+RE_LANDMARK = re.compile(r'^(\s*)- (region|form) "([^"]+)"', re.MULTILINE)
+
+def new_panels(before: str, after: str) -> list[str]:
+    """Named `region`/`form` subtrees present in `after` but not in `before`.
+
+    Not every trigger opens a modal. «Write e-mail» may unfold a compose REGION inside the
+    page; the crawler recorded dialogs only, so the map never showed the form, and the spec
+    waited for a dialog that was never going to appear."""
+    seen = {m.group(3) for m in RE_LANDMARK.finditer(before)}
+    lines = after.splitlines()
+    out = []
+    for i, line in enumerate(lines):
+        m = RE_LANDMARK.match(line)
+        if not m or m.group(3) in seen:
+            continue
+        indent = len(m.group(1))
+        block = [line]
+        for nxt in lines[i + 1:]:
+            if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            block.append(nxt)
+        out.append("\n".join(block)[:DIALOG_ARIA_MAX])
+    return out
+
 def capture_modal(page) -> str:
     """The ARIA snapshot of a modal that is open right now, or "".
 
@@ -489,6 +513,10 @@ def interactive_discover(page, origin: str) -> tuple[list[str], list[dict]]:
     page.route("**/*", guard)
     page.on("dialog", on_dialog)
     try:
+        base_aria = page.locator("body").aria_snapshot()
+    except Exception:
+        base_aria = ""
+    try:
         sel = "button, [role=button], [role=tab], [role=menuitem]"
         count = min(page.locator(sel).count(), INTERACTIVE_CLICKS_PER_PAGE)
         deadline = time.monotonic() + INTERACTIVE_PAGE_BUDGET_S
@@ -511,6 +539,14 @@ def interactive_discover(page, origin: str) -> tuple[list[str], list[dict]]:
             snap = capture_modal(page)
             if snap and not any(d["aria"] == snap for d in dialogs):
                 dialogs.append({"trigger": trigger[:60], "aria": snap})
+            elif not snap and page.url == base_url:
+                try:
+                    after = page.locator("body").aria_snapshot()
+                except Exception:
+                    after = ""
+                for panel in new_panels(base_aria, after):
+                    if not any(d["aria"] == panel for d in dialogs):
+                        dialogs.append({"trigger": trigger[:60], "aria": panel, "kind": "panel"})
 
             if page.url != base_url:
                 u = urlparse(page.url)
@@ -827,14 +863,35 @@ def deref(openapi: dict, schema: dict) -> dict:
     return ((openapi.get("components") or {}).get("schemas") or {}).get(name) or {}
 
 
-def schema_fields(openapi: dict, schema: dict, limit: int = 20) -> str:
-    """Flatten a schema into `field*:type` (star = required). Resolves one $ref."""
+def _ref_of(v: dict) -> dict | None:
+    """The `$ref` a property points to — directly, or as pydantic's `anyOf: [$ref, null]`."""
+    if not isinstance(v, dict):
+        return None
+    if "$ref" in v:
+        return v
+    for alt in v.get("anyOf") or v.get("allOf") or []:
+        if isinstance(alt, dict) and "$ref" in alt:
+            return alt
+    return None
+
+def schema_fields(openapi: dict, schema: dict, limit: int = 20, depth: int = 1) -> str:
+    """Flatten a schema into `field*:type` (star = required). Resolves one $ref.
+
+    A nested object used to print as `location*:$ref`: the generator never saw that the
+    location needs a `postal_code`, sent a body without it, and every such spec died on a 422.
+    Nested references are now expanded `depth` levels deep, required fields first."""
     schema = deref(openapi, schema)
     props = schema.get("properties") or {}
     required = set(schema.get("required") or [])
+    ordered = sorted(props.items(), key=lambda kv: kv[0] not in required)
     out = []
-    for k, v in list(props.items())[:limit]:
-        t = (v or {}).get("type") or ("$ref" if "$ref" in (v or {}) else "any")
+    for k, v in ordered[:limit]:
+        ref = _ref_of(v or {})
+        if ref is not None and depth > 0:
+            inner = schema_fields(openapi, ref, limit=8, depth=depth - 1)
+            t = f"{{{inner}}}" if inner else "object"
+        else:
+            t = (v or {}).get("type") or ("$ref" if ref is not None else "any")
         out.append(f"{k}{'*' if k in required else ''}:{t}")
     return ", ".join(out)
 
@@ -1017,7 +1074,7 @@ def render_context_md(project: dict, pages: list[dict], openapi: dict, user_me: 
             # section by route, so a dialog attached anywhere else would never reach the
             # prompt of the test case that opens it.
             modals = "".join(
-                f"\n\n# --- dialog opened by «{d['trigger']}» ---\n{d['aria']}"
+                f"\n\n# --- {d.get('kind', 'dialog')} opened by «{d['trigger']}» ---\n{d['aria']}"
                 for d in (p.get("dialogs") or [])
             )
             lines.append(f"### `{route}`{sampled}\n```yaml\n{clipped}{note}{modals}\n```")

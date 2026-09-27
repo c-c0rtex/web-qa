@@ -2953,3 +2953,30 @@ def test_the_passive_oracles_stop_failing_what_they_cannot_judge():
     assert probe_excuse(500, "/x", "500", None) is None
     fronts, backs = extract_paths("Open `/orders/<id>` and GET `/orders/<id>/items`")
     assert "/orders/{id}" in fronts and ("GET", "/orders/{id}/items") in backs
+
+def test_a_nested_request_body_shows_its_required_fields():
+    """`location*:$ref` hid a required `postal_code`; every spec that built the body died on 422."""
+    from explore import schema_fields
+    api = {"components": {"schemas": {
+        "Loc": {"type": "object", "required": ["postal_code", "city"],
+                "properties": {"note": {"type": "string"}, "city": {"type": "string"},
+                               "postal_code": {"type": "string"}}},
+        "Company": {"type": "object", "required": ["name", "location"],
+                    "properties": {"name": {"type": "string"},
+                                   "location": {"$ref": "#/components/schemas/Loc"},
+                                   "parent": {"anyOf": [{"$ref": "#/components/schemas/Loc"}, {"type": "null"}]}}}}}}
+    out = schema_fields(api, {"$ref": "#/components/schemas/Company"})
+    assert "location*:{city*:string, postal_code*:string, note:string}" in out
+    assert out.startswith("name*:string, location*:")          # required fields first
+    assert "parent:{" in out                                     # Optional[Model] expanded too
+
+def test_an_inline_panel_opened_by_a_trigger_is_recorded():
+    """«Write e-mail» unfolded a compose region, not a dialog; the map recorded dialogs only and
+    the spec waited for a modal that never came."""
+    from explore import new_panels
+    before = '- main:\n  - heading "Mail"\n  - region "Filters":\n    - textbox "Search"\n'
+    after = (before + '  - region "Write to customer":\n    - combobox "Customer"\n'
+             '    - button "Send"\n  - button "Close"\n')
+    panels = new_panels(before, after)
+    assert panels == ['  - region "Write to customer":\n    - combobox "Customer"\n    - button "Send"']
+    assert new_panels(before, before) == []

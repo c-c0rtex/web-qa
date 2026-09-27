@@ -119,7 +119,8 @@ REQUIREMENTS:
       page.getByText('Title').locator('xpath=following::input[1]')
   `page.locator('input').near(...)` DOES NOT EXIST — there is no `.near()` method on a Locator.
   Add a `// NOTE: unlabeled input` comment wherever you do this
-- DIALOGS: a snapshot may carry `# --- dialog opened by «X» ---` blocks. That IS the modal's
+- DIALOGS: a snapshot may carry `# --- dialog opened by «X» ---` blocks (and `# --- panel opened by «X» ---`
+  for an inline region the trigger unfolds). That IS the modal's
   real DOM — use it. If a route's snapshot has no such block, the crawl did not open its
   dialogs (`web-qa-explore --interactive` does), and their absence is NOT evidence that their
   fields have labels. Assume they do not: inside `getByRole('dialog')`, reach fields
@@ -196,13 +197,43 @@ UI-FIRST RULE (what makes the spec worth anything):
   first `page.goto` and then fails leaves playwright screenshotting `about:blank` — the one
   artifact a human needs to judge the failure is blank
 
+UI MODEL RULE (each of these failed real generated specs against a correct app):
+- Every caption, label and ROLE comes from the APP MAP snapshot of the route you are on — not
+  from the test case's wording (it paraphrases, often in another language) and not from another
+  route. `button "Details"` is a button: `getByRole('tab')` will never find it
+- `getByText` matches visible TEXT only. A name that lives in `aria-label`/`title` — an icon
+  button, a calendar cell, `combobox "Access level"` — is found with `getByRole(role, {{ name }})`
+- A value typed into or shown by an INPUT is not text: `toHaveValue`, never `toContainText`
+- After "create", apps often NAVIGATE to the new record's page. Do not look for the new row in
+  the list you were on: assert the record page (URL / heading), or open the list again
+- Clicking a row's text rarely opens anything. Use the row's own action button (edit, open);
+  when it has no name, take the data-testid from the map, or the row's n-th button with a NOTE
+- A trigger may open an INLINE panel/region, not a dialog. If the map does not show what it
+  opens, wait for either: `page.getByRole('dialog').or(page.getByRole('region', {{ name }}))`
+- `combobox` in a snapshot is usually a custom widget: click it, then `getByRole('option')`.
+  `selectOption` works on a native `<select>` only. In a dialog with several comboboxes, pick
+  the one by its label or testid — never the first one
+- Search boxes may need Enter or a submit button; a value may render after the element does —
+  wait for the value itself (`toHaveText(/\\d/)`) before reading it
+- Tables can end in a totals row, and apps normalise input (`1234,5` → `1 234,50`, trimmed,
+  re-cased): count data rows the way the app's own counter does; compare meaning, not echo
+- Journals and lists are shared with other tests running at the same time: find YOUR entity by
+  its QA- name or id — never assume the first/top row is yours. An accessible name can change
+  with the very action under test (a marked calendar cell gains a suffix): match with a prefix
+- The browser reaches the backend through the frontend (a proxy prefix such as `/api`): match
+  captured request URLs by suffix or regex, never by exact path
+- The display number of an entity (`#19`, `A-104`) is usually not its database id
+
 AUTH RULE (the single most common way these specs die):
 - Log in with exactly the environment variables named above. Never invent an email, never
   substitute another account's
 - `page.request` shares the BROWSER context: it carries session cookies, and nothing else.
   If the AUTH FLOW returns a bearer token, every call to `API` must go through a
-  request context that sends it — `request.newContext({{ extraHTTPHeaders: {{ Authorization:
-  `Bearer ${{token}}` }} }})`. `page.request.get(API_URL)` without that header is a 401
+  request context that sends it — `import {{ test, expect, request as pwRequest }} from
+  '@playwright/test'`, then `await pwRequest.newContext({{ extraHTTPHeaders: {{ Authorization:
+  `Bearer ${{token}}` }} }})`. The test's own `{{ request }}` fixture is already a context and has
+  NO `newContext` — destructuring it and calling `request.newContext` is a TypeError.
+  `page.request.get(API_URL)` without that header is a 401
 - The only legitimate use of `page.request` against `API` is the login POST itself
 
 READING TEXT, URLS AND NUMBERS BACK OUT (how a correct spec still goes red):

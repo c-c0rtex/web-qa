@@ -117,6 +117,14 @@ RULES:
   that endpoint's aggregation is broken, the check passes on a broken feature. If no
   independent source exists, say so in the bullet and assert an invariant instead (ordering,
   sum of parts equals the displayed total)
+- NAME UI CONTROLS EXACTLY AS THE MAP SHOWS THEM ON THAT ROUTE, in the UI's language, in «»
+  quotes. A list's column headers are not the create form's field labels (the column «Price» may
+  be the field «Unit price»); an API field (`is_contact`, `outcome`) is not a control on screen.
+  Name only what the map shows; if the map lacks a form, say so instead of inventing its fields
+- Never invent a WIRE value (an enum member, an entity type, a status) — use the ones the map's
+  endpoints and enums list, with their exact casing, or have the test discover them
+- Do not assume a form starts empty (fields are often prefilled) or that "create" leaves you on
+  the list (apps often open the new record). State what happens only when the map shows it
 - If behaviour differs per role, write SEPARATE TCs annotated `**Role:** <name>` — never mix
   two roles' expectations in one TC. Unannotated TCs run under the default account
 - Write steps/expected in {language}; keep ids/paths/technical terms as-is
