@@ -109,9 +109,15 @@ def is_backend_path(path: str, backend_prefixes: tuple[str, ...]) -> bool:
     return any(path == p or path.startswith(p) for p in backend_prefixes)
 
 
+RE_ANGLE_PARAM = re.compile(r"(/[A-Za-z0-9_\-/{}.]*)<([A-Za-z_][A-Za-z0-9_]*)>")
+
 def extract_paths(text: str, backend_prefixes: tuple[str, ...] = DEFAULT_BACKEND_PREFIXES) -> tuple[list[str], list[tuple[str, str]]]:
     """Returns (frontend_paths, backend_ops). Backend op detection has priority — its paths are
     excluded from frontend list."""
+    # `/orders/<id>` is as common in prose as `/orders/{id}`; the path patterns stopped at `<`
+    # and probed `/orders/` instead
+    while RE_ANGLE_PARAM.search(text):
+        text = RE_ANGLE_PARAM.sub(r"\1{\2}", text)
     backs: list[tuple[str, str]] = []
     seen_b: set[tuple[str, str]] = set()
     backend_only_paths: set[str] = set()
@@ -338,6 +344,34 @@ def apply_visual_masks(page, mask_selectors: list[str]) -> None:
         emit("visual", f"mask failed: {e}")
 
 
+def dominant_script(text: str) -> str | None:
+    """The alphabet most letters of `text` are written in: latin, cyrillic, cjk — or None."""
+    counts = {"latin": len(re.findall(r"[a-zà-ÿß]", text, re.I)),
+              "cyrillic": len(re.findall(r"[а-яё]", text, re.I)),
+              "cjk": sum(len(t) for t in RE_CJK_TOKEN.findall(text))}
+    best = max(counts, key=counts.get)
+    return best if counts[best] else None
+
+
+def probe_excuse(status: int, path: str, body: str, run_role: str | None) -> str | None:
+    """Why a 4xx from a backend probe is not the test case failing — or None when it is.
+
+    The probe requests whatever GET a test case mentions, as whatever role the run uses. A 403
+    for a role the test case says nothing about is an access decision, not a defect (RBAC
+    test cases judge those); a 403 the test case itself names is the expected outcome; a 422
+    on a bare path means the endpoint needs parameters the prose only described."""
+    if str(status) in body and status in (401, 403, 404, 409, 422):
+        return f"the test case itself names {status}"
+    if status in (401, 403) and run_role:
+        declared = [r.lower() for r in tc_roles(body)]
+        if run_role.lower() not in declared:
+            return (f"access denied to role {run_role}, which this test case does not declare "
+                    f"— access per role is the RBAC test cases' call")
+    if status == 422 and "?" not in path:
+        return "the endpoint requires parameters this test case did not give"
+    return None
+
+
 def spec_for_tc(webqa: Path, tc_id: str, tc: dict | None = None) -> str | None:
     """The generated spec that executes this test case, if one exists.
 
@@ -362,7 +396,8 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
                    visual_masks: list[str], visual_exclude: list[str], vp_suffix: str = "",
                    update_routes: str | None = None, token: str | None = None,
                    asserted_by_spec: str | None = None,
-                   entity_routes: dict[str, str] | None = None) -> dict:
+                   entity_routes: dict[str, str] | None = None,
+                   run_role: str | None = None) -> dict:
     body = tc["body"]
     fronts, backs = extract_paths(body, backend_prefixes)
     expected = expected_keywords(body)
@@ -467,7 +502,16 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
                 # its words a page can possibly show. Once a spec asserts the same test case
                 # with real assertions, the keyword score is a smoke signal, not a verdict.
                 if checkable and hit_count / checkable < 0.3:
-                    if asserted_by_spec:
+                    kw_script = dominant_script(" ".join(" ".join(keyword_to_search_terms(k)) for k in expected))
+                    page_script = dominant_script(visible_text)
+                    if kw_script and page_script and kw_script != page_script:
+                        # Expected prose in one alphabet, the page in another (test cases in the
+                        # team's language, UI in the users'): no word can ever match, and 44 of
+                        # 49 passive "failures" in one run were this.
+                        notes.append(f"  only {hit_count}/{checkable} expected-keywords visible on "
+                                     f"{path} — informational: Expected is {kw_script}, the page is "
+                                     f"{page_script}; a word count cannot judge across languages")
+                    elif asserted_by_spec:
                         notes.append(f"  only {hit_count}/{checkable} expected-keywords visible on "
                                      f"{path} — informational: asserted by `specs/{asserted_by_spec}`")
                     else:
@@ -496,7 +540,11 @@ def run_passive_tc(tc: dict, page, target: str, backend: str, cookies: dict, ids
                 r = cli.request(method, full)
                 notes.append(f"{method} {path} → {r.status_code}")
                 if r.status_code >= 400:
-                    overall = "fail"
+                    excuse = probe_excuse(r.status_code, materialized, body, run_role)
+                    if excuse:
+                        notes[-1] += f" — not judged: {excuse}"
+                    else:
+                        overall = "fail"
             except Exception as e:
                 overall = "error"
                 notes.append(f"{method} {path} → exception: {str(e)[:80]}")
@@ -633,7 +681,7 @@ def main() -> int:
                                      backend_prefixes, route_hints, visual_masks, visual_exclude,
                                      vp_suffix, args.routes, token,
                                      spec_for_tc(project_path / ".web-qa", tc["id"], tc),
-                                     id_routes(id_discovery))
+                                     id_routes(id_discovery), args.role)
                 # Network assertion: a 5xx during THIS TC's navigation is a failure signal,
                 # not a footnote (config `network_fail_on`, default ["5xx"] — add "4xx" to
                 # tighten). Structural, language-agnostic, same as everywhere else.

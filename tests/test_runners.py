@@ -2926,3 +2926,22 @@ def test_every_browser_context_shares_one_locale():
     from pathlib import Path
     tpl = (Path(__file__).resolve().parent.parent / "playwright.config.template.ts").read_text()
     assert "locale: process.env.WEBQA_LOCALE" in tpl
+
+def test_the_passive_oracles_stop_failing_what_they_cannot_judge():
+    """One run: 49 passive failures, 0 of them the app — 44 word counts across two languages,
+    and backend probes that failed a 403 the role was meant to get, a 307 redirect, `<id>`
+    read as the end of a path, and a 422 from an endpoint called without its parameters."""
+    from run_scenarios import dominant_script, extract_paths, probe_excuse
+    assert dominant_script("сумма инвойса равна позициям") == "cyrillic"
+    assert dominant_script("Rechnung hinzufügen · Positionen") == "latin"
+    assert dominant_script("123 — 456") is None
+    body = "**Role:** editor\n**Steps:**\n1. GET `/admin/users`\n**Expected:**\n- 403"
+    assert probe_excuse(403, "/admin/users", body, "editor")            # the TC names it
+    assert probe_excuse(403, "/admin/mailboxes", "no role here", "viewer")  # role not declared
+    assert probe_excuse(403, "/admin/mailboxes", "no role here", None) is None
+    assert probe_excuse(403, "/x", "**Role:** viewer\n", "viewer") is None  # declared, unexpected
+    assert probe_excuse(422, "/mail/search/probe", "x", None)
+    assert probe_excuse(422, "/mail/search/probe?email=a", "x", None) is None
+    assert probe_excuse(500, "/x", "500", None) is None
+    fronts, backs = extract_paths("Open `/orders/<id>` and GET `/orders/<id>/items`")
+    assert "/orders/{id}" in fronts and ("GET", "/orders/{id}/items") in backs

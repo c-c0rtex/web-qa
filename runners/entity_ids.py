@@ -29,7 +29,9 @@ def backend_client(cookies: dict, token: str | None) -> httpx.Client:
     and the passive runner reported that as the test case failing. The token was already in
     a local variable two frames up."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return httpx.Client(cookies=cookies, headers=headers, timeout=10)
+    # follow_redirects: FastAPI answers `/orders/` with a 307 to `/orders`; a redirect is the
+    # route working, and it was being reported as the test case failing
+    return httpx.Client(cookies=cookies, headers=headers, timeout=10, follow_redirects=True)
 
 
 def discover_ids(backend: str, cookies: dict, id_discovery: list[dict],
