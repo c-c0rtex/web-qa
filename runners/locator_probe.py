@@ -146,7 +146,8 @@ def probe_spec(spec_path: Path, proj: dict, role: str | None = None) -> dict | N
     locators = entry_locators(source)
     if not path or not locators:
         return None
-    from explore import api_login, build_storage_state, context_kwargs_for, resolve_credentials, viewport_entry
+    from explore import (api_login, browser_locale, build_storage_state, context_kwargs_for,
+                         resolve_credentials, viewport_entry)
     try:
         email, password = resolve_credentials(proj, None, None, role or role_from_spec(source, proj))
         cookies, _me, token = api_login(proj.get("backend_url") or proj["target_url"],
@@ -161,7 +162,8 @@ def probe_spec(spec_path: Path, proj: dict, role: str | None = None) -> dict | N
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             ctx = browser.new_context(storage_state=storage,
-                                      **context_kwargs_for(viewport_entry(proj), p))
+                                      **context_kwargs_for(viewport_entry(proj), p,
+                                                           browser_locale(proj)))
             page = ctx.new_page()
             page.goto(proj["target_url"].rstrip("/") + path,
                       wait_until="domcontentloaded", timeout=15000)

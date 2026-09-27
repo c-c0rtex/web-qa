@@ -102,7 +102,8 @@ def spec_env(proj: dict) -> dict[str, str]:
     registry password in plain text across a hundred files that live in the project repo.
     Every runner that starts playwright passes this environment instead."""
     env = {"WEBQA_BASE_URL": proj["target_url"],
-           "WEBQA_BACKEND_URL": proj.get("backend_url") or proj["target_url"]}
+           "WEBQA_BACKEND_URL": proj.get("backend_url") or proj["target_url"],
+           "WEBQA_LOCALE": browser_locale(proj)}
     auth = proj.get("auth") or {}
     if auth.get("email") and auth.get("password"):
         env["WEBQA_EMAIL"], env["WEBQA_PASSWORD"] = auth["email"], auth["password"]
@@ -173,18 +174,33 @@ def viewport_entry(proj: dict, name: str | None = None) -> dict:
     raise SystemExit(f"viewport {name!r} not found; known viewports: {known}")
 
 
-def context_kwargs_for(entry: dict, playwright) -> dict:
+DEFAULT_LOCALE = "en-US"
+
+def browser_locale(proj: dict) -> str:
+    """The ONE browser locale every web-qa context uses — config `locale`, else en-US.
+
+    An app that picks its UI language from Accept-Language showed the crawler (no locale
+    set, so no header) German and Playwright Test (en-US by default) English. The map was
+    German, every generated locator was German, and 38 of 47 spec failures were a heading
+    looked up in the wrong language."""
+    return proj.get("locale") or DEFAULT_LOCALE
+
+def context_kwargs_for(entry: dict, playwright, locale: str | None = None) -> dict:
     """Playwright new_context kwargs for a viewport entry. `device` entries use the
     full descriptor (touch, user-agent, deviceScaleFactor) — real mobile emulation,
-    not just a narrow window."""
+    not just a narrow window. `locale` pins Accept-Language / navigator.language."""
     device = entry.get("device")
     if device:
         descriptor = playwright.devices.get(device)
         if not descriptor:
             raise SystemExit(f"unknown Playwright device {device!r} (see playwright.devices)")
-        return dict(descriptor)
-    return {"viewport": {"width": int(entry.get("width", DEFAULT_VIEWPORT["width"])),
-                         "height": int(entry.get("height", DEFAULT_VIEWPORT["height"]))}}
+        kwargs = dict(descriptor)
+    else:
+        kwargs = {"viewport": {"width": int(entry.get("width", DEFAULT_VIEWPORT["width"])),
+                               "height": int(entry.get("height", DEFAULT_VIEWPORT["height"]))}}
+    if locale:
+        kwargs["locale"] = locale
+    return kwargs
 
 
 def viewport_suffix(proj: dict, name: str | None) -> str:
@@ -512,7 +528,7 @@ def interactive_discover(page, origin: str) -> tuple[list[str], list[dict]]:
 def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
           per_template: int = 2, vp_entry: dict | None = None,
           seed_paths: list[str] | None = None, interactive: bool = False, bar=None,
-          templates: TemplateIndex | None = None) -> list[dict]:
+          templates: TemplateIndex | None = None, locale: str | None = None) -> list[dict]:
     """BFS over same-origin URLs, return list of page summaries.
     Visits at most `per_template` concrete URLs per normalized route template so
     entity cards (/orders/1, /orders/2, …) don't eat the whole max_pages budget.
@@ -546,8 +562,8 @@ def crawl(target_url: str, storage_state: dict, max_pages: int = 30,
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        kwargs = context_kwargs_for(vp_entry, p) if vp_entry else {"viewport": DEFAULT_VIEWPORT}
-        ctx = browser.new_context(storage_state=storage_state, **kwargs)
+        ctx = browser.new_context(storage_state=storage_state,
+                                  **context_kwargs_for(vp_entry or {}, p, locale))
         page = ctx.new_page()
 
         while queue and len(pages) < max_pages:
@@ -1156,7 +1172,8 @@ def main() -> int:
     bar.start(f"crawling {target} (max_pages={args.max_pages}, viewport={label}"
               f"{', interactive' if args.interactive else ''})")
     pages = crawl(target, storage, max_pages=args.max_pages, vp_entry=entry,
-                  seed_paths=seeds, interactive=args.interactive, bar=bar, templates=templates)
+                  seed_paths=seeds, interactive=args.interactive, bar=bar, templates=templates,
+                  locale=browser_locale(proj))
     crawled_count = len(pages)
     bar.finish(f"{crawled_count} page(s) crawled")
 
@@ -1186,7 +1203,8 @@ def main() -> int:
     out.write_text(merge_manual_section(md, existing))
     sidecar_path(out).write_text(
         json.dumps({"generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "pages": pages}, ensure_ascii=False, indent=1), encoding="utf-8")
+                    "locale": browser_locale(proj), "pages": pages},
+                   ensure_ascii=False, indent=1), encoding="utf-8")
     print(json.dumps({"alias": args.alias, "pages_crawled": crawled_count,
                       "routes_mined": len(mined), "out": str(out),
                       "size": out.stat().st_size, "merge": merge_report}, ensure_ascii=False))

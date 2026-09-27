@@ -47,6 +47,9 @@ def playwright_config_drift(text: str) -> list[str]:
     if "WEBQA_BASE_URL" not in code:
         problems.append("`baseURL` is hardcoded, not `process.env.WEBQA_BASE_URL ?? …`: the "
                         "suite runs only against that one host")
+    if "WEBQA_LOCALE" not in code:
+        problems.append("`locale` is not `process.env.WEBQA_LOCALE ?? …`: specs may see the app "
+                        "in another language than the crawler that wrote their locators")
     if "actionTimeout" not in text:
         problems.append("no `actionTimeout`: a locator that never matches hangs until the "
                         "test timeout and reports no locator name")
@@ -141,8 +144,8 @@ def http_ok(url: str, timeout: float = 5.0) -> tuple[bool, str]:
 
 def check_project(results: list[dict], alias: str) -> None:
     # imported lazily so a broken env fails in the deps CHECK, not with a traceback on startup
-    from explore import (api_login, load_project, registry_secrets, resolve_credentials,
-                         viewport_entries)
+    from explore import (api_login, browser_locale, load_project, registry_secrets,
+                         resolve_credentials, viewport_entries)
     try:
         proj = load_project(alias)
     except SystemExit as e:
@@ -249,6 +252,21 @@ def check_project(results: list[dict], alias: str) -> None:
     check(results, "app.context.md", OK if ctx.is_file() else WARN,
           f"{ctx.stat().st_size} bytes" if ctx.is_file() else "missing",
           "" if ctx.is_file() else "run web-qa-explore (spec-gen quality depends on it)")
+
+    sidecar = webqa / "app.context.json"
+    if sidecar.is_file():
+        try:
+            mapped = json.loads(sidecar.read_text(encoding="utf-8")).get("locale")
+        except (OSError, json.JSONDecodeError):
+            mapped = None
+        wanted = browser_locale(proj)
+        if mapped != wanted:
+            check(results, "map locale", WARN,
+                  f"map crawled with locale {mapped or 'unset'}, project runs {wanted}",
+                  "re-run web-qa-explore: an app that picks its language from the browser "
+                  "shows specs a UI their locators were not written for")
+        else:
+            check(results, "map locale", OK, wanted)
 
     scen = list((webqa / "scenarios").glob("*.md")) if (webqa / "scenarios").is_dir() else []
     check(results, "scenarios", OK if scen else WARN, f"{len(scen)} file(s)",

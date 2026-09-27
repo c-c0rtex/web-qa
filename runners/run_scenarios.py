@@ -31,6 +31,7 @@ from entity_ids import backend_client, discover_ids, id_routes, materialize_path
 from spec_sigs import is_stale, load_signatures
 from explore import (
     api_login,
+    browser_locale,
     build_storage_state,
     context_kwargs_for,
     load_project,
@@ -579,7 +580,8 @@ def main() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context(storage_state=storage,
-                                  **context_kwargs_for(viewport_entry(proj, args.viewport), p))
+                                  **context_kwargs_for(viewport_entry(proj, args.viewport), p,
+                                                       browser_locale(proj)))
         if AXE_JS:
             ctx.add_init_script(AXE_JS)
         page = ctx.new_page()

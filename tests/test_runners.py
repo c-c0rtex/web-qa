@@ -1793,6 +1793,7 @@ def test_drift_does_not_confuse_expect_timeout_with_the_test_budget():
     ok = ("outputDir: process.env.WEBQA_OUTPUT_DIR ?? 'test-results',\n"
           "timeout: 60_000,\n  expect: { timeout: 8_000 },\n"
           "  use: { baseURL: process.env.WEBQA_BASE_URL ?? 'http://127.0.0.1:3000',\n"
+          "         locale: process.env.WEBQA_LOCALE ?? 'en-US',\n"
           "         actionTimeout: 10_000, navigationTimeout: 15_000 },\n")
     assert playwright_config_drift(ok) == []
 
@@ -2903,3 +2904,25 @@ def test_the_entry_state_ends_at_the_next_navigation():
     await expect(page.getByRole('heading', { name: 'New shipment' })).toBeVisible();
     """
     assert [(loc["value"], loc["name"]) for loc in entry_locators(src)] == [("table", None)]
+
+def test_every_browser_context_shares_one_locale():
+    """The crawler sent no Accept-Language and got a German UI; Playwright Test sent en-US and
+    got English. Every locator from the German map missed: 38 of 47 spec failures."""
+    import inspect
+    import explore
+    import locator_probe
+    import run_scenarios
+    from explore import browser_locale, context_kwargs_for, spec_env
+
+    class PW:
+        devices = {"Pixel 7": {"viewport": {"width": 412, "height": 915}, "is_mobile": True}}
+    assert context_kwargs_for({}, PW, "de-DE")["locale"] == "de-DE"
+    assert context_kwargs_for({"device": "Pixel 7"}, PW, "de-DE")["locale"] == "de-DE"
+    assert browser_locale({}) == "en-US" and browser_locale({"locale": "de-DE"}) == "de-DE"
+    assert spec_env({**PROJ, "locale": "de-DE"})["WEBQA_LOCALE"] == "de-DE"
+    for mod, fn in ((explore, explore.main), (run_scenarios, run_scenarios.main),
+                    (locator_probe, locator_probe.probe_spec)):
+        assert "browser_locale(proj)" in inspect.getsource(fn), mod.__name__
+    from pathlib import Path
+    tpl = (Path(__file__).resolve().parent.parent / "playwright.config.template.ts").read_text()
+    assert "locale: process.env.WEBQA_LOCALE" in tpl

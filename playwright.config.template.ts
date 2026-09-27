@@ -49,6 +49,10 @@ export default defineConfig({
     // WEBQA_BASE_URL from the registry (a caller's own value wins — that is how CI retargets),
     // and generated specs navigate with relative paths against it.
     baseURL: process.env.WEBQA_BASE_URL ?? 'http://127.0.0.1:3000',
+    // Same browser locale as the crawler that built the map (config `locale`, default en-US).
+    // An app that picks its language from Accept-Language otherwise shows the specs a UI in
+    // another language than the one their locators were written against.
+    locale: process.env.WEBQA_LOCALE ?? 'en-US',
     // Without this, a locator that never matches makes `click`/`fill` wait until the
     // 30s TEST timeout, and playwright reports a bare "Test timeout of 30000ms
     // exceeded." with no locator, no step, nothing. Bounding the ACTION instead
