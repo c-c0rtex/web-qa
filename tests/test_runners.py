@@ -2980,3 +2980,30 @@ def test_an_inline_panel_opened_by_a_trigger_is_recorded():
     panels = new_panels(before, after)
     assert panels == ['  - region "Write to customer":\n    - combobox "Customer"\n    - button "Send"']
     assert new_panels(before, before) == []
+
+def test_a_heal_that_skips_the_failure_is_masking_and_a_heal_must_pass_to_count(tmp_path, monkeypatch):
+    """One maintain run reported 28 specs "healed": 4 passed afterwards, 22 still failed, and
+    one "fix" had wrapped the failing setup in test.skip — green by not checking."""
+    import maintain
+    from maintain import masks_failure
+    before = "test('t', async () => { expect(1).toBe(2); });"
+    assert masks_failure(before, "test.skip(true, 'no data');\n" + before)
+    assert not masks_failure(before, "test('t', async () => { expect(1).toBe(1); });")
+    webqa = tmp_path / ".web-qa"
+    (webqa / "specs").mkdir(parents=True)
+    spec = webqa / "specs" / "a.spec.ts"
+    spec.write_text("import { test } from '@playwright/test';\n" + before)
+    fixed = "import { test, expect } from '@playwright/test';\ntest('t', async () => { expect(1).toBe(1); });\n"
+    monkeypatch.setattr(maintain, "call_claude", lambda p, **k: fixed)
+    monkeypatch.setattr(maintain, "validate_spec", lambda w, o: None)
+    monkeypatch.setattr(maintain, "rerun_is_flaky", lambda *a: False)       # still fails on rerun
+    name, out, err, kind, detail, _ = maintain.heal_one(spec, ["boom"], "MAP", webqa, True)
+    assert err is None and kind == "fix-failing"
+    monkeypatch.setattr(maintain, "rerun_is_flaky", lambda *a: True)        # passes on rerun
+    spec.write_text("import { test } from '@playwright/test';\n" + before)
+    assert maintain.heal_one(spec, ["boom"], "MAP", webqa, True)[3] == "fix"
+    monkeypatch.setattr(maintain, "call_claude", lambda p, **k: "import { test } from '@playwright/test';\ntest.skip(true, 'x');\n" + before)
+    spec.write_text("import { test } from '@playwright/test';\n" + before)
+    _, out, err, *_ = maintain.heal_one(spec, ["boom"], "MAP", webqa, True)
+    assert out is None and "masking" in err
+    assert "test.skip" not in spec.read_text()

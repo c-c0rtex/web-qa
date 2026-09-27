@@ -32,7 +32,8 @@ from progress import Progress, emit
 from run_scenarios import norm_route
 from spec_gen import (DEFAULT_MAX_USD, apply_project_budget, call_claude, llm_spend,
                       load_app_context, load_seed, postprocess_spec,
-                      seed_prompt_section, spend_probe, stand_values_in, validate_spec)
+                      seed_prompt_section, spend_probe, stand_values_in, validate_spec,
+                      drop_narration)
 
 # `await page.goto(`${APP}/orders/${id}`)` → /orders/${id}; also plain '/orders'
 RE_SPEC_GOTO = re.compile(r"""goto\(\s*[`'"]([^`'"]*)""")
@@ -238,6 +239,14 @@ RE_TRANSIENT = re.compile(r"^\s*//\s*TRANSIENT:\s*(.+)$", re.MULTILINE)
 RE_APP_BUG = re.compile(r"^\s*//\s*APP-BUG:\s*(.+)$", re.MULTILINE)
 
 
+HEAL_TIMEOUT = 600
+RE_PARK = re.compile(r"\btest\.(?:skip|fixme)\s*\(")
+
+def masks_failure(before: str, after: str) -> bool:
+    """Does the fix add a test.skip/test.fixme the failing spec did not have?"""
+    return len(RE_PARK.findall(after)) > len(RE_PARK.findall(before))
+
+
 def classify_heal_output(code: str) -> tuple[str, str]:
     """('transient'|'app-bug'|'fix', detail) from the healer's leading marker comment.
     Only the first lines count — a marker buried mid-code is not a classification."""
@@ -365,7 +374,10 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
         failure_context_section=failure_context_section(artifacts["error_context"]),
     )
     try:
-        code = postprocess_spec(call_claude(prompt))
+        # 600 s: a heal carries the failing spec, its errors and the page snapshot at failure;
+        # on a frontier model 300 s killed 5 of 34 heals, unmetered
+        code = postprocess_spec(drop_narration(call_claude(
+            prompt, timeout=int(os.environ.get("WEBQA_GEN_TIMEOUT") or HEAL_TIMEOUT))))
     except Exception as e:
         return spec_path.name, None, f"claude failed: {e}", "fix", "", None
     if not code.strip():
@@ -377,6 +389,11 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
         # playwright's error text carries full URLs; a fix that copies one pins the spec to
         # this stand — and it would be written into the project repo
         return spec_path.name, None, f"fix hardcodes {', '.join(leaks)} — not written", kind, detail, None
+    if kind == "fix" and masks_failure(spec_code, code):
+        # A heal that makes a failing test SKIP is not a heal: the suite turns green while the
+        # thing it checked is unchecked. Only an APP-BUG verdict may park a test (test.fixme)
+        return (spec_path.name, None, "fix adds test.skip/test.fixme without an APP-BUG verdict "
+                "— masking, not written", kind, detail, None)
     if kind == "transient":
         # nothing to write — the spec is fine, the environment hiccuped
         return spec_path.name, None, None, kind, detail, None
@@ -397,8 +414,11 @@ def heal_one(spec_path: Path, errors: list[str], app_context: str, webqa: Path,
             out_file.write_text(out_file.with_suffix(out_file.suffix + ".bak").read_text(encoding="utf-8"),
                                 encoding="utf-8")
             return spec_path.name, None, f"fix did not parse, rolled back: {parse_err[:300]}", kind, detail, None
+    if apply_fix and kind == "fix" and not rerun_is_flaky(webqa, spec_path.name, 1, None, None):
+        # "Healed" used to mean "the fix parsed". Run it: 22 of 28 such heals still failed
+        kind = "fix-failing"
     probe_warning = None
-    if kind == "fix" and proj is not None:
+    if kind in ("fix", "fix-failing") and proj is not None:
         # report-only: a healer that "fixed" the spec into non-existent elements should be
         # visible immediately, not on the next failing run
         from locator_probe import probe_feedback, probe_spec
@@ -471,7 +491,8 @@ def main() -> int:
     # Fallback for a spec whose routes we cannot read; heal_one re-slices per spec when it can.
     app_context = load_app_context(proj_dir, include_aria=False)
     seed_section = seed_prompt_section(load_seed(proj_dir))
-    summary = {"healed": [], "transient": [], "app_bugs": [], "errors": [], "probe_warnings": [],
+    summary = {"healed": [], "still_failing": [], "transient": [], "app_bugs": [], "errors": [],
+               "probe_warnings": [],
                "mode": "apply" if args.apply else "propose"}
     emit("maintain", f"{len(fails)} failing spec(s), {args.workers} workers")
 
@@ -525,6 +546,9 @@ def main() -> int:
             elif kind == "transient":
                 summary["transient"].append({"spec": name, "reason": detail})
                 bar.step(f"{name}: {detail[:100]} (untouched — rerun)", "ENV")
+            elif kind == "fix-failing":
+                summary["still_failing"].append({"spec": name, "out": out_file})
+                bar.step(f"{name}: fix applied, still fails on rerun", "FAIL")
             elif kind == "app-bug":
                 summary["app_bugs"].append({"spec": name, "bug": detail, "out": out_file})
                 record_app_bug(proj_dir, name, detail)
@@ -533,8 +557,9 @@ def main() -> int:
                 summary["healed"].append({"spec": name, "out": out_file})
                 bar.step(f"{name} → {Path(out_file).name}", "OK")
 
-    bar.finish(f"{len(summary['healed'])} healed, {len(summary['app_bugs'])} app-bug(s), "
-               f"{len(summary['transient'])} transient")
+    bar.finish(f"{len(summary['healed'])} healed (verified by a rerun), "
+               f"{len(summary['still_failing'])} fixed but still failing, "
+               f"{len(summary['app_bugs'])} app-bug(s), {len(summary['transient'])} transient")
 
     if args.with_screens:
         summary["screens"] = {fname: failure_artifacts(webqa, fname, artifacts_dir)["screens"]
