@@ -3007,3 +3007,13 @@ def test_a_heal_that_skips_the_failure_is_masking_and_a_heal_must_pass_to_count(
     _, out, err, *_ = maintain.heal_one(spec, ["boom"], "MAP", webqa, True)
     assert out is None and "masking" in err
     assert "test.skip" not in spec.read_text()
+
+def test_a_failed_setup_call_is_not_allowed_to_become_a_skip():
+    """26 generated specs of one suite skipped whenever a setup request failed; each broken
+    call — mostly the spec's own — showed up as "skipped", never as a failure."""
+    from spec_gen import PROMPT_TEMPLATE, RE_SKIP_ON_RESPONSE
+    assert RE_SKIP_ON_RESPONSE.search("test.skip(!orderResp.ok(), `order: ${orderResp.status()}`);")
+    assert RE_SKIP_ON_RESPONSE.search("if (!r.ok()) test.skip(true, `failed: ${r.status()}`);")
+    assert RE_SKIP_ON_RESPONSE.search("if (!created.ok()) { test.skip(true, 'could not create'); }")
+    assert not RE_SKIP_ON_RESPONSE.search("test.skip(!factories.length, 'no factories on the stand');")
+    assert "A FAILED SETUP IS A FAILURE, NEVER A SKIP" in PROMPT_TEMPLATE

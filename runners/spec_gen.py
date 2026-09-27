@@ -223,6 +223,10 @@ UI MODEL RULE (each of these failed real generated specs against a correct app):
 - The browser reaches the backend through the frontend (a proxy prefix such as `/api`): match
   captured request URLs by suffix or regex, never by exact path
 - The display number of an entity (`#19`, `A-104`) is usually not its database id
+- A FAILED SETUP IS A FAILURE, NEVER A SKIP. Do not `test.skip` because an API call answered
+  non-2xx or an endpoint was not found — that hides a broken call (often your own) as
+  "skipped". Assert it: `expect(resp.ok(), await resp.text()).toBeTruthy()`. `test.skip` is
+  only for prerequisite DATA the stand lacks and the test cannot create, with the reason
 
 AUTH RULE (the single most common way these specs die):
 - Log in with exactly the environment variables named above. Never invent an email, never
@@ -293,6 +297,19 @@ YOUR PREVIOUS ATTEMPT FAILED — playwright could not parse the generated file:
 {error}
 
 Output the FULL corrected .spec.ts (just the code, no fences):
+"""
+
+RE_SKIP_ON_RESPONSE = re.compile(
+    r"test\.skip\([^;]*?\.(?:ok|status)\(\)"                       # skip(!r.ok(), …) / reason with status()
+    r"|\.ok\(\)\s*\)\s*\{?\s*(?:return\s+)?test\.skip\(")      # if (!r.ok()) test.skip(…)
+
+SKIP_RETRY_SUFFIX = """
+
+YOUR PREVIOUS ATTEMPT WAS REJECTED — it skips the test when an API call fails
+(`test.skip(... .ok() ...)`). A failed setup call is a FAILURE: assert it with
+`expect(resp.ok(), await resp.text()).toBeTruthy()` so the report shows it. Skip only when the
+stand lacks prerequisite data the test cannot create. Output the FULL corrected .spec.ts
+(just the code, no fences):
 """
 
 NO_CODE_RETRY_SUFFIX = """
@@ -1104,6 +1121,13 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
             last_err = "no code in the answer (narration or an attempted tool call)"
             attempt_prompt = prompt + NO_CODE_RETRY_SUFFIX
             _note(f"RETRY {tc_key}: answer had no code (costs another full call)")
+            continue
+        if RE_SKIP_ON_RESPONSE.search(code):
+            # 26 specs of one suite skipped themselves whenever a setup call failed: every
+            # broken request — usually the spec's own — was reported as "skipped", never red
+            last_err = "spec skips on a failed API response"
+            attempt_prompt = prompt + SKIP_RETRY_SUFFIX
+            _note(f"RETRY {tc_key}: spec skips when a setup call fails (costs another full call)")
             continue
         leaks = stand_values_in(code, proj)
         if leaks:
