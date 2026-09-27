@@ -631,19 +631,23 @@ def call_claude(prompt: str, timeout: int | None = None, *, model: str | None = 
 
 
 def postprocess_spec(code: str) -> str:
-    """Mechanical safety net over LLM output.
+    """Mechanical safety net over LLM output — the prompt forbids networkidle, but if it
+    slips through anyway, downgrade it to a state that actually settles."""
+    return code.replace("'networkidle'", "'domcontentloaded'").replace('"networkidle"', '"domcontentloaded"')
 
-    - the prompt forbids networkidle; if it slips through, downgrade it to a state that
-      actually settles
-    - a model that narrates before the code («let me check the form's logic first…») had
-      its whole answer rejected by the parser and paid for a retry, although the code after
-      the narration was fine. Anything before the first `import`, and a closing markdown
-      fence, is dropped"""
-    m = re.search(r"^import\s", code, re.MULTILINE)
+
+RE_CODE_START = re.compile(r"^(?:import\s|//|/\*|test\(|const\s)", re.MULTILINE)
+
+def drop_narration(code: str) -> str:
+    """spec-gen only. A model that narrates before the code («let me check the form's logic
+    first…») had its whole answer rejected by the parser and paid for a retry, although the
+    code after the narration was fine. Prose before the first line of code, and markdown
+    fences, are dropped. Comment lines count as code: maintain's healer puts its
+    `// TRANSIENT:` / `// APP-BUG:` verdict there, which is why this is not postprocess_spec."""
+    m = RE_CODE_START.search(code)
     if m and m.start() > 0:
         code = code[m.start():]
-    code = re.sub(r"\n```[ \t]*\s*$", "\n", code)
-    return code.replace("'networkidle'", "'domcontentloaded'").replace('"networkidle"', '"domcontentloaded"')
+    return re.sub(r"\n```[ \t]*\s*$", "\n", code)
 
 
 def validate_spec(webqa: Path, out_path: Path) -> str | None:
@@ -1077,7 +1081,7 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
             attempt_prompt = prompt + LEAK_RETRY_SUFFIX.format(found=", ".join(leaks))
             _note(f"RETRY {tc_key}: spec hardcodes {', '.join(leaks)} (costs another full call)")
             continue
-        code = postprocess_spec(code)
+        code = postprocess_spec(drop_narration(code))
         out_path.write_text(code, encoding="utf-8")
         parse_err = validate_spec(webqa, out_path)
         if parse_err is not None:
@@ -1085,18 +1089,20 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
             attempt_prompt = prompt + RETRY_SUFFIX.format(error=parse_err)
             _note(f"RETRY {tc_key}: spec did not parse (costs another full call)")
             continue
-        fb = None
+        fb = report = None
         if proj is not None and live_probe:
-            fb = probe_feedback(probe_spec(out_path, proj, role))
+            probed = probe_spec(out_path, proj, role)
+            fb = probe_feedback(probed)                  # entry-state problems: worth a retry
+            report = probe_feedback(probed, later=True)  # everything, for the summary
         if fb and not probe_retried:
             probe_retried = True
-            good = (code, fb)
+            good = (code, report)
             budget += 1
             attempt_prompt = prompt + PROBE_RETRY_SUFFIX.format(feedback=fb)
             _note(f"RETRY {tc_key}: locators missing on the entry page "
                   f"(costs another full call)")
             continue
-        return tc_key, None, fb
+        return tc_key, None, report
     if good is not None:
         # the probe's retry failed to parse (or leaked); the spec it was meant to improve
         # parsed — keep that one, with the probe's warning, rather than fail the test case

@@ -282,7 +282,9 @@ test('t', async ({ page }) => {
         spec.unlink()
     assert res is not None
     assert res["url"] == "/items" and res["checked"] == 3
-    assert res["misses"] == ["getByRole('button', { name: 'No Such Button' })"]
+    # located after the first action: reported, but not evidence against the spec (no retry)
+    assert res["misses"] == []
+    assert res["later_misses"] == ["getByRole('button', { name: 'No Such Button' })"]
     assert res["ambiguous"] == []
 
 

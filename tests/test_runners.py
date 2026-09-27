@@ -2815,10 +2815,13 @@ def test_control_gaps_are_controls_not_the_data_they_show():
     assert controls_by_route(snap)["/calendar"] == {"neue aufgabe", "export"}
 
 def test_narration_before_the_code_is_not_a_parse_failure():
-    from spec_gen import postprocess_spec
-    out = postprocess_spec("Let me check the form logic first.\n```ts\nimport { test } from '@playwright/test';\n"
-                           "test('x', async () => {});\n```\n")
+    from spec_gen import drop_narration, postprocess_spec
+    out = drop_narration("Let me check the form logic first.\n```ts\nimport { test } from '@playwright/test';\n"
+                         "test('x', async () => {});\n```\n")
     assert out.startswith("import { test }") and "```" not in out
+    # maintain's verdict marker lives in the first comment line and must survive
+    healed = "// TRANSIENT: dev server was down\nimport { test } from '@playwright/test';\n"
+    assert drop_narration(healed) == healed and postprocess_spec(healed) == healed
 
 def test_the_probe_retry_is_extra_and_a_parsed_spec_is_never_failed(tmp_path, monkeypatch):
     """parse retry, then a valid spec with probe feedback: the loop ended WITHOUT the probe
@@ -2836,7 +2839,7 @@ def test_the_probe_retry_is_extra_and_a_parsed_spec_is_never_failed(tmp_path, mo
     monkeypatch.setattr(spec_gen, "validate_spec",
                         lambda webqa, out: None if out.read_text().startswith("import") else "SyntaxError")
     monkeypatch.setattr(locator_probe, "probe_spec", lambda *a, **k: {"x": 1})
-    monkeypatch.setattr(locator_probe, "probe_feedback", lambda r: "- getByRole('button', {name: 'Nope'}): 0 matches")
+    monkeypatch.setattr(locator_probe, "probe_feedback", lambda r, later=False: "- getByRole('button', {name: 'Nope'}): 0 matches")
     out = tmp_path / "x.spec.ts"
     key, err, warning = spec_gen.gen_one("s::TC-1", "PROMPT", out, tmp_path, PROJ, live_probe=True)
     assert len(calls) == 3                         # the announced probe retry really happens

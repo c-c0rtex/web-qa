@@ -143,7 +143,8 @@ def probe_spec(spec_path: Path, proj: dict, role: str | None = None) -> dict | N
     (see role_from_spec) so the probe sees the SAME page the spec's session would."""
     source = spec_path.read_text(encoding="utf-8")
     path = entry_path(source)
-    locators = entry_locators(source)
+    locators = extract_locators(source)
+    entry = {(loc["kind"], loc["value"], loc["name"]) for loc in entry_locators(source)}
     if not path or not locators:
         return None
     from explore import (api_login, browser_locale, build_storage_state, context_kwargs_for,
@@ -156,7 +157,7 @@ def probe_spec(spec_path: Path, proj: dict, role: str | None = None) -> dict | N
     except (SystemExit, Exception):
         return None
 
-    result = {"url": path, "checked": 0, "misses": [], "ambiguous": [], "skipped": 0}
+    result = {"url": path, "checked": 0, "misses": [], "later_misses": [], "ambiguous": [], "skipped": 0}
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -178,9 +179,12 @@ def probe_spec(spec_path: Path, proj: dict, role: str | None = None) -> dict | N
                     continue
                 result["checked"] += 1
                 verdict = classify_count(loc, locator.count())
+                at_entry = (loc["kind"], loc["value"], loc["name"]) in entry
                 if verdict == "miss":
-                    result["misses"].append(loc["raw"])
-                elif verdict == "ambiguous":
+                    # only an entry-state miss is evidence against the spec; one located after
+                    # an action may simply not exist yet — reported, never retried for
+                    result["misses" if at_entry else "later_misses"].append(loc["raw"])
+                elif verdict == "ambiguous" and at_entry:
                     result["ambiguous"].append(f"{loc['raw']} → {locator.count()} elements")
             browser.close()
     except Exception:
@@ -188,11 +192,16 @@ def probe_spec(spec_path: Path, proj: dict, role: str | None = None) -> dict | N
     return result
 
 
-def probe_feedback(result: dict | None) -> str | None:
-    """Human/LLM-readable summary of probe problems; None = nothing to report."""
-    if not result or not (result["misses"] or result["ambiguous"]):
+def probe_feedback(result: dict | None, later: bool = False) -> str | None:
+    """Human/LLM-readable summary of probe problems; None = nothing to report.
+    `later` adds misses located after the first action — for the report, not for a retry."""
+    later_misses = (result or {}).get("later_misses") or [] if later else []
+    if not result or not (result["misses"] or result["ambiguous"] or later_misses):
         return None
     lines: list[str] = []
+    if later_misses:
+        lines.append(f"not on `{result['url']}` before the first action (may appear after it):")
+        lines += [f"  - {m}" for m in later_misses]
     if result["misses"]:
         lines.append(f"resolved to 0 elements on `{result['url']}`:")
         lines += [f"  - {m}" for m in result["misses"]]
