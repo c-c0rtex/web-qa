@@ -53,6 +53,30 @@ def extract_locators(source: str) -> list[dict]:
     return out
 
 
+# The first interaction after the first goto ends the page's ENTRY state. Anything located
+# after it — a dialog's fields, a menu's items, a row the spec just created — does not exist
+# yet when the probe looks. 34 of 35 probe retries in one run "fixed" such locators into
+# the same correct code, each at the price of a full model call.
+RE_ACTION = re.compile(
+    r"\.(?:click|dblclick|fill|press|type|check|uncheck|selectOption|setInputFiles|dragTo|hover|tap)\(")
+# Roles that exist only after something opened them, wherever the spec mentions them.
+TRANSIENT_ROLES = {"dialog", "alertdialog", "menu", "menuitem", "listbox", "option", "tooltip"}
+
+def entry_locators(source: str) -> list[dict]:
+    """The static locators the entry page itself must have: those up to the first action
+    after the first `goto` (inclusive) or the next navigation, whichever comes first, minus
+    roles that only appear once opened."""
+    goto = RE_GOTO.search(source)
+    if goto:
+        # the entry state also ends where the spec navigates on: a second goto, a waitForURL
+        ends = [m.end() for m in (RE_ACTION.search(source, goto.end()),) if m]
+        ends += [m.start() for m in (RE_GOTO.search(source, goto.end()),
+                                     re.compile(r"\.waitForURL\(").search(source, goto.end())) if m]
+        if ends:
+            source = source[:min(ends)]
+    return [loc for loc in extract_locators(source)
+            if not (loc["kind"] == "Role" and loc["value"] in TRANSIENT_ROLES)]
+
 def entry_path(source: str) -> str | None:
     """Path of the FIRST page.goto — the page the flow starts on. None when it is
     dynamic (template slug etc.): probing a guessed page would produce false misses."""
@@ -119,7 +143,7 @@ def probe_spec(spec_path: Path, proj: dict, role: str | None = None) -> dict | N
     (see role_from_spec) so the probe sees the SAME page the spec's session would."""
     source = spec_path.read_text(encoding="utf-8")
     path = entry_path(source)
-    locators = extract_locators(source)
+    locators = entry_locators(source)
     if not path or not locators:
         return None
     from explore import api_login, build_storage_state, context_kwargs_for, resolve_credentials, viewport_entry

@@ -2717,7 +2717,9 @@ def test_a_spec_that_hardcodes_the_stand_is_named_by_kind_not_value():
 
 def test_a_leaky_generation_is_never_written(tmp_path, monkeypatch):
     import spec_gen
-    replies = iter(["await page.goto('http://127.0.0.1:5173/x'); // s3cret-admin",
+    replies = iter(["import { test } from '@playwright/test';\n"
+                    "test('TC-1: x', async ({ page }) => { await page.goto('http://127.0.0.1:5173/x'); }); // s3cret-admin",
+                    "import { test } from '@playwright/test';\n"
                     "test('TC-1: x', async ({ page }) => { await page.goto('/x'); });"])
     written: list[str] = []
     monkeypatch.setattr(spec_gen, "call_claude", lambda prompt, **k: next(replies))
@@ -2770,14 +2772,24 @@ def test_a_timed_out_call_is_a_clean_error_that_admits_its_spend_is_unmetered(mo
     killed call's cost never reached the meter, and nothing said so."""
     import subprocess
     import spec_gen
-    def boom(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="claude", timeout=k.get("timeout"))
-    monkeypatch.setattr(spec_gen.subprocess, "run", boom)
+    killed = []
+    class Hangs:
+        pid, returncode, calls = 4242, -9, 0
+        def __init__(self, *a, **k):
+            assert k.get("start_new_session") and k.get("stdin") is subprocess.DEVNULL
+        def communicate(self, timeout=None):
+            Hangs.calls += 1
+            if Hangs.calls == 1:
+                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+            return "", ""
+    monkeypatch.setattr(spec_gen.subprocess, "Popen", Hangs)
+    monkeypatch.setattr(spec_gen.os, "killpg", lambda pgid, sig: killed.append(pgid))
     monkeypatch.setattr(spec_gen, "_check_budget", lambda: None)
     try:
         spec_gen.call_claude("x", timeout=7)
     except spec_gen.LLMTimeout as e:
         assert "7s" in str(e) and "not in the budget meter" in str(e)
+        assert killed == [4242] and not spec_gen._LIVE_GROUPS     # the whole group, and forgotten
     else:
         raise AssertionError("no LLMTimeout")
     import inspect
@@ -2849,3 +2861,45 @@ def test_a_spec_for_an_older_version_of_its_test_case_is_stale(tmp_path):
     record_signatures(webqa / "specs", {"ship__tc-s3.spec.ts": tc_signature(current)})
     assert stale_specs(webqa) == set()
     assert spec_for_tc(webqa, "TC-S3", current) == "ship__tc-s3.spec.ts"
+
+def test_an_answer_without_code_is_retried_without_running_the_parser(tmp_path, monkeypatch):
+    """With tools off the model announced a lookup and wrote out a tool call as text; the
+    parser rejected it and the retry repeated the same mistake."""
+    import spec_gen
+    good = "import { test } from '@playwright/test';\ntest('TC-1: x', async () => {});\n"
+    prompts, parsed = [], []
+    replies = iter(["I'll check the permission keys first.\n\n**Tool: bash**", good])
+    monkeypatch.setattr(spec_gen, "call_claude", lambda p, **k: prompts.append(p) or next(replies))
+    monkeypatch.setattr(spec_gen, "validate_spec", lambda w, o: parsed.append(o) or None)
+    key, err, _ = spec_gen.gen_one("s::TC-1", "PROMPT", tmp_path / "x.spec.ts", tmp_path, PROJ,
+                                   live_probe=False)
+    assert err is None and len(parsed) == 1            # the narration never reached the parser
+    assert "NO CODE" in prompts[1] and "no tools" in prompts[1].lower()
+    assert "You have NO tools" in spec_gen.PROMPT_TEMPLATE
+
+def test_the_probe_checks_only_what_the_entry_page_must_have():
+    """A dialog's fields do not exist before the click that opens it; the probe called them
+    missing and 34 of 35 retries regenerated the same correct code at a full call each."""
+    from locator_probe import entry_locators
+    src = """
+    const API = process.env.WEBQA_BACKEND_URL!;
+    await page.goto('/admin/users', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('table')).toBeVisible();
+    await page.getByRole('button', { name: 'New user' }).click();
+    const dialog = page.getByRole('dialog', { name: 'New user' });
+    await dialog.getByRole('textbox', { name: 'E-Mail' }).fill('qa@x.io');
+    await dialog.getByRole('button', { name: 'Create' }).click();
+    """
+    got = {(loc["kind"], loc["value"], loc["name"]) for loc in entry_locators(src)}
+    assert got == {("Role", "table", None), ("Role", "button", "New user")}
+
+def test_the_entry_state_ends_at_the_next_navigation():
+    """A second goto to `/shipments/new` put that page's heading on the `/shipments` probe."""
+    from locator_probe import entry_locators
+    src = """
+    await page.goto('/shipments', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('table')).toBeVisible();
+    await page.goto('/shipments/new', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('heading', { name: 'New shipment' })).toBeVisible();
+    """
+    assert [(loc["value"], loc["name"]) for loc in entry_locators(src)] == [("table", None)]

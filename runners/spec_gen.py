@@ -19,10 +19,12 @@ Output layout:
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -84,6 +86,11 @@ APP MAP (auto-crawled; REAL routes, form fields, button labels and table headers
 {a11y_section}{dnd_section}
 
 TASK: Generate ONE Playwright spec file (TypeScript) for the test case below. Output ONLY raw .spec.ts code (no markdown fences, no commentary). The file will be saved verbatim and compiled by tsc.
+
+You have NO tools in this session: you cannot read the repository, run a command or open the app,
+and a tool call written out as text is saved into the spec and breaks it. Everything you get is in
+this prompt. Where a fact is missing — a section key, an enum value, an id, a response field — make
+the TEST discover it at run time through the API (list, then pick), instead of stopping to look it up.
 
 REQUIREMENTS:
 - Use `import {{ test, expect }} from '@playwright/test'` at the top
@@ -255,6 +262,13 @@ YOUR PREVIOUS ATTEMPT FAILED — playwright could not parse the generated file:
 {error}
 
 Output the FULL corrected .spec.ts (just the code, no fences):
+"""
+
+NO_CODE_RETRY_SUFFIX = """
+
+YOUR PREVIOUS ANSWER CONTAINED NO CODE — it announced a check or wrote out a tool call. You have
+no tools. Write the spec from what this prompt gives you, discovering unknown values at run time
+through the API. Output the FULL .spec.ts (just the code, no fences):
 """
 
 LEAK_RETRY_SUFFIX = """
@@ -538,6 +552,34 @@ def parse_claude_json(stdout: str) -> str:
     return strip_fences(str(payload.get("result") or ""))
 
 
+_LIVE_GROUPS: set[int] = set()     # process groups of claude -p calls still running
+
+
+def _kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _reap_live_calls(*_args) -> None:
+    for pgid in list(_LIVE_GROUPS):
+        _kill_group(pgid)
+
+
+def _on_sigterm(signum, _frame) -> None:
+    _reap_live_calls()
+    raise SystemExit(128 + signum)
+
+
+# Stopping web-qa (Ctrl-C, `kill`, a harness cancelling the task) must stop the model calls
+# it started. Handlers can only be set from the main thread, and never over someone else's.
+atexit.register(_reap_live_calls)
+if (threading.current_thread() is threading.main_thread()
+        and signal.getsignal(signal.SIGTERM) is signal.SIG_DFL):
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
 def call_claude(prompt: str, timeout: int | None = None, *, model: str | None = None,
                 effort: str | None = None, tools: str | None = None) -> str:
     """Run one headless `claude -p` session and return its text result.
@@ -564,18 +606,28 @@ def call_claude(prompt: str, timeout: int | None = None, *, model: str | None = 
     # loop, a CI step or an agent harness, whatever sat on stdin went to the model with the
     # task — the rest of the loop's input vanished into the first call — and an open pipe
     # that never closes leaves the call waiting for EOF.
+    #
+    # Own process group, killed whole: the CLI runs as more than one process, and killing
+    # the direct child on timeout — or killing web-qa itself — left the rest running and
+    # spending, unmetered, alongside the next call.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, text=True, start_new_session=True)
+    _LIVE_GROUPS.add(proc.pid)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                              stdin=subprocess.DEVNULL)
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _kill_group(proc.pid)
+        proc.communicate()
         raise LLMTimeout(f"claude -p timed out after {timeout}s and was killed — whatever it "
                          f"spent is not in the budget meter; raise WEBQA_GEN_TIMEOUT") from None
+    finally:
+        _LIVE_GROUPS.discard(proc.pid)
     if proc.returncode != 0:
         # The CLI reports usage-limit exhaustion on stdout, not stderr. Reading only
         # stderr turned "5-hour limit reached" into a blank, unactionable error.
-        detail = (proc.stderr.strip() or proc.stdout.strip() or "(no output)")[:500]
+        detail = (stderr.strip() or stdout.strip() or "(no output)")[:500]
         raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {detail}")
-    return parse_claude_json(proc.stdout)
+    return parse_claude_json(stdout)
 
 
 def postprocess_spec(code: str) -> str:
@@ -1011,6 +1063,12 @@ def gen_one(tc_key: str, prompt: str, out_path: Path, webqa: Path,
         if not code.strip():
             last_err = "empty output from claude"
             _note(f"RETRY {tc_key}: empty output (costs another full call)")
+            continue
+        if not re.search(r"^import\s", code, re.MULTILINE):
+            # narration or a tool call written out as text: no parser run needed to know
+            last_err = "no code in the answer (narration or an attempted tool call)"
+            attempt_prompt = prompt + NO_CODE_RETRY_SUFFIX
+            _note(f"RETRY {tc_key}: answer had no code (costs another full call)")
             continue
         leaks = stand_values_in(code, proj)
         if leaks:
