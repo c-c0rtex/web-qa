@@ -1189,7 +1189,7 @@ def gen_specs(alias: str, *, all_tcs: bool = False, only_tc: str | None = None,
         for tc in tcs:
             tc_id = tc["id"]
             tc_key = f"{scenario_stem}::{tc_id}"
-            if only_tc and only_tc != tc_id:
+            if only_tc and tc_id not in {t.strip() for t in only_tc.split(",")}:
                 continue
             if not all_tcs and not is_mutating(tc):
                 summary["skipped_passive"].append(tc_key)
@@ -1359,7 +1359,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--alias", required=True)
     ap.add_argument("--all", action="store_true", help="generate all TCs, not only mutating")
-    ap.add_argument("--tc", help="only generate this TC id (e.g. TC-I4)")
+    ap.add_argument("--tc", help="only generate these TC ids, comma-separated (e.g. TC-I4,TC-O2) — "
+                                 "regenerating a run's failures is one process, not one per spec")
     ap.add_argument("--force", action="store_true", help="ignore cache")
     ap.add_argument("--workers", type=int, default=1,
                     help="parallel claude calls (default 1). Concurrent calls all miss the "
